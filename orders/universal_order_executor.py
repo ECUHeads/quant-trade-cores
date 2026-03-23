@@ -48,15 +48,6 @@ class ExecutionResult:
     method:     str   = ""          # MT5 | API_REST | JSON_DUMP
     message:    str   = ""
     metadata:   dict  = field(default_factory=dict)
-    # ── Enhancement: Fill Quality & Cost Tracking
-    order_type:      str   = "MARKET"     # MARKET | LIMIT | STOP | STOP_LIMIT
-    intended_price:  float = 0            # price we wanted
-    actual_fill:     float = 0            # price we got
-    slippage_usd:    float = 0            # |actual - intended| × size
-    spread_at_entry: float = 0            # bid-ask spread at execution time
-    is_requote:      bool  = False        # True if requoted before fill
-    retcode:         int   = 0            # MT5 retcode / HTTP status
-    fill_latency_ms: int   = 0           # time from submit to fill
 
 
 # ============================================================
@@ -73,7 +64,7 @@ class JsonDumpAdapter:
 
     def submit(self, symbol: str, side: str, size: float, sizing_unit: str,
                entry_price: float, stop_loss: float, take_profit: float,
-               metadata: dict = None, order_type: str = "MARKET") -> ExecutionResult:
+               metadata: dict = None) -> ExecutionResult:
         self._counter += 1
         now = datetime.now(timezone.utc)
         sig_id = f"SIG-{now.strftime('%Y%m%d')}-{self._counter:04d}"
@@ -82,7 +73,6 @@ class JsonDumpAdapter:
             "signal_id":   sig_id,
             "timestamp":   now.isoformat(),
             "action":      "OPEN",
-            "order_type":  order_type,       # MARKET | LIMIT | STOP | STOP_LIMIT
             "ticker":      symbol,
             "side":        side.upper(),
             "size":        size,
@@ -100,14 +90,12 @@ class JsonDumpAdapter:
         with open(fpath, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
-        logger.info(f"📤 JSON Signal: {fname} [{order_type}]")
+        logger.info(f"📤 JSON Signal: {fname}")
         return ExecutionResult(
             success=True, order_id=sig_id, symbol=symbol, side=side,
             size=size, sizing_unit=sizing_unit, entry_price=entry_price,
             stop_loss=stop_loss, take_profit=take_profit,
             method="JSON_DUMP", message=f"Written to {fpath}",
-            order_type=order_type, intended_price=entry_price,
-            actual_fill=entry_price,
         )
 
     def flatten_all(self):
@@ -181,7 +169,7 @@ class Mt5Adapter:
 
     def submit(self, symbol: str, side: str, size: float, sizing_unit: str,
                entry_price: float, stop_loss: float, take_profit: float,
-               metadata: dict = None, order_type: str = "MARKET") -> ExecutionResult:
+               metadata: dict = None) -> ExecutionResult:
         if not self._mt5:
             reason = (f"MT5 not available (OS={self._os}). "
                       f"Use JSON_DUMP or Windows VPS." if hasattr(self, '_os')
@@ -189,111 +177,33 @@ class Mt5Adapter:
             return ExecutionResult(success=False, method="MT5", message=reason)
 
         mt5 = self._mt5
-        t0 = time.time()
-
-        # ── Map order_type to MT5 action + type
-        if order_type == "MARKET":
-            action = mt5.TRADE_ACTION_DEAL
-            mt5_type = mt5.ORDER_TYPE_BUY if side.upper() in ("LONG", "BUY") else mt5.ORDER_TYPE_SELL
-        elif order_type == "LIMIT":
-            action = mt5.TRADE_ACTION_PENDING
-            if side.upper() in ("LONG", "BUY"):
-                mt5_type = mt5.ORDER_TYPE_BUY_LIMIT
-            else:
-                mt5_type = mt5.ORDER_TYPE_SELL_LIMIT
-        elif order_type == "STOP":
-            action = mt5.TRADE_ACTION_PENDING
-            if side.upper() in ("LONG", "BUY"):
-                mt5_type = mt5.ORDER_TYPE_BUY_STOP
-            else:
-                mt5_type = mt5.ORDER_TYPE_SELL_STOP
-        elif order_type == "STOP_LIMIT":
-            action = mt5.TRADE_ACTION_PENDING
-            if side.upper() in ("LONG", "BUY"):
-                mt5_type = mt5.ORDER_TYPE_BUY_STOP_LIMIT
-            else:
-                mt5_type = mt5.ORDER_TYPE_SELL_STOP_LIMIT
-        else:
-            action = mt5.TRADE_ACTION_DEAL
-            mt5_type = mt5.ORDER_TYPE_BUY if side.upper() in ("LONG", "BUY") else mt5.ORDER_TYPE_SELL
-
-        # ── Capture spread before execution
-        tick = mt5.symbol_info_tick(symbol)
-        spread_at_entry = 0.0
-        if tick:
-            spread_at_entry = round(tick.ask - tick.bid, 8)
+        order_type = mt5.ORDER_TYPE_BUY if side.upper() in ("LONG", "BUY") else mt5.ORDER_TYPE_SELL
 
         request = {
-            "action":    action,
+            "action":    mt5.TRADE_ACTION_DEAL,
             "symbol":    symbol,
             "volume":    float(size),
-            "type":      mt5_type,
+            "type":      order_type,
             "price":     entry_price,
             "sl":        stop_loss,
             "tp":        take_profit,
             "deviation": 20,
             "magic":     19_151_500,      # unique magic number
-            "comment":   f"UE-{order_type}",
+            "comment":   "UniversalEngine",
             "type_time": mt5.ORDER_TIME_DAY,
         }
 
-        # ── For STOP_LIMIT: set stoplimit price
-        if order_type == "STOP_LIMIT":
-            request["stoplimit"] = entry_price
-
         result = mt5.order_send(request)
-        latency_ms = int((time.time() - t0) * 1000)
-
-        # ── Requote / failure detection
-        REQUOTE_CODES = {10004, 10016, 10021}  # REQUOTE, PRICE_OFF, PRICE_CHANGED
-        is_requote = False
-        retcode = 0
-
-        if result is None:
-            return ExecutionResult(
-                success=False, method="MT5", message="MT5 returned None",
-                retcode=0, fill_latency_ms=latency_ms,
-            )
-
-        retcode = result.retcode
-
-        if retcode in REQUOTE_CODES:
-            is_requote = True
-            logger.warning(
-                f"⚡ MT5 REQUOTE {symbol}: code={retcode} "
-                f"({result.comment}) intended={entry_price:.5f}"
-            )
-
-        if retcode != mt5.TRADE_RETCODE_DONE:
-            msg = f"MT5 error: {result.comment} (code={retcode})"
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            msg = f"MT5 error: {result.comment if result else 'None'}"
             logger.error(msg)
-            return ExecutionResult(
-                success=False, method="MT5", message=msg,
-                retcode=retcode, is_requote=is_requote,
-                fill_latency_ms=latency_ms,
-            )
-
-        # ── Success: compute slippage
-        actual_fill = result.price
-        slippage = abs(actual_fill - entry_price) * size
-        if sizing_unit == "LOTS":
-            slippage = abs(actual_fill - entry_price) * size * 100_000  # approx for forex
-        elif sizing_unit == "CONTRACTS":
-            slippage = abs(actual_fill - entry_price) * size * 20  # approx for NQ
+            return ExecutionResult(success=False, method="MT5", message=msg)
 
         return ExecutionResult(
             success=True, order_id=str(result.order), symbol=symbol,
             side=side, size=size, sizing_unit=sizing_unit,
-            entry_price=actual_fill, stop_loss=stop_loss, take_profit=take_profit,
+            entry_price=result.price, stop_loss=stop_loss, take_profit=take_profit,
             method="MT5", message=f"Ticket #{result.order}",
-            order_type=order_type,
-            intended_price=entry_price,
-            actual_fill=actual_fill,
-            slippage_usd=round(slippage, 4),
-            spread_at_entry=spread_at_entry,
-            is_requote=is_requote,
-            retcode=retcode,
-            fill_latency_ms=latency_ms,
         )
 
     def flatten_all(self):
@@ -339,22 +249,21 @@ class ApiRestAdapter:
 
     def submit(self, symbol: str, side: str, size: float, sizing_unit: str,
                entry_price: float, stop_loss: float, take_profit: float,
-               metadata: dict = None, order_type: str = "MARKET") -> ExecutionResult:
+               metadata: dict = None) -> ExecutionResult:
         import requests as req
 
-        t0 = time.time()
-
         if self._alpaca_client:
+            # Alpaca: ส่ง fractional ได้ → ไม่ int() ถ้า allow_fractional
+            # (Config check อยู่ที่ risk_manager แล้ว → ที่นี่แค่ส่งตาม)
             alpaca_size = round(size, 4) if size != int(size) else int(size)
             return self._submit_alpaca(symbol, side, alpaca_size, entry_price,
-                                       stop_loss, take_profit, order_type)
+                                       stop_loss, take_profit)
 
         # ── Generic REST fallback
         payload = {
             "symbol": symbol, "side": side, "qty": size,
             "price": entry_price, "stop_loss": stop_loss,
             "take_profit": take_profit,
-            "order_type": order_type,
         }
         headers = {"Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"}
@@ -363,79 +272,36 @@ class ApiRestAdapter:
                             headers=headers, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-            latency_ms = int((time.time() - t0) * 1000)
             return ExecutionResult(
                 success=True, order_id=str(data.get("id", "")),
                 symbol=symbol, side=side, size=size, sizing_unit=sizing_unit,
                 entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit,
                 method="API_REST", message="OK",
-                order_type=order_type, intended_price=entry_price,
-                fill_latency_ms=latency_ms,
             )
         except Exception as e:
             return ExecutionResult(success=False, method="API_REST", message=str(e))
 
-    def _submit_alpaca(self, symbol, side, shares, entry, sl, tp,
-                       order_type="MARKET") -> ExecutionResult:
-        from alpaca.trading.requests import (
-            LimitOrderRequest, MarketOrderRequest,
-            TakeProfitRequest, StopLossRequest, StopLimitOrderRequest,
-        )
+    def _submit_alpaca(self, symbol, side, shares, entry, sl, tp) -> ExecutionResult:
+        from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
 
-        t0 = time.time()
         order_side = OrderSide.BUY if side.upper() in ("LONG", "BUY") else OrderSide.SELL
-
+        req = LimitOrderRequest(
+            symbol=symbol, qty=shares, side=order_side,
+            limit_price=round(entry, 2), time_in_force=TimeInForce.DAY,
+            take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
+            stop_loss=StopLossRequest(stop_price=round(sl, 2)),
+        )
         try:
-            if order_type == "MARKET":
-                req = MarketOrderRequest(
-                    symbol=symbol, qty=shares, side=order_side,
-                    time_in_force=TimeInForce.DAY,
-                    take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
-                    stop_loss=StopLossRequest(stop_price=round(sl, 2)),
-                )
-            elif order_type in ("LIMIT", "STOP_LIMIT"):
-                req = LimitOrderRequest(
-                    symbol=symbol, qty=shares, side=order_side,
-                    limit_price=round(entry, 2),
-                    time_in_force=TimeInForce.DAY,
-                    take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
-                    stop_loss=StopLossRequest(stop_price=round(sl, 2)),
-                )
-            else:  # STOP or fallback
-                req = LimitOrderRequest(
-                    symbol=symbol, qty=shares, side=order_side,
-                    limit_price=round(entry, 2),
-                    time_in_force=TimeInForce.DAY,
-                    take_profit=TakeProfitRequest(limit_price=round(tp, 2)),
-                    stop_loss=StopLossRequest(stop_price=round(sl, 2)),
-                )
-
             order = self._alpaca_client.submit_order(order_data=req)
-            latency_ms = int((time.time() - t0) * 1000)
-
-            # Detect partial fill
-            actual_fill = float(order.filled_avg_price or entry)
-            is_partial = (order.status == "partially_filled")
-            slippage = abs(actual_fill - entry) * shares
-
             return ExecutionResult(
                 success=True, order_id=str(order.id), symbol=symbol,
                 side=side, size=shares, sizing_unit="SHARES",
-                entry_price=actual_fill, stop_loss=sl, take_profit=tp,
-                method="API_REST",
-                message=f"Alpaca {order.status} [{order_type}]",
-                order_type=order_type,
-                intended_price=entry,
-                actual_fill=actual_fill,
-                slippage_usd=round(slippage, 4),
-                fill_latency_ms=latency_ms,
+                entry_price=entry, stop_loss=sl, take_profit=tp,
+                method="API_REST", message=f"Alpaca order {order.status}",
             )
         except Exception as e:
-            return ExecutionResult(
-                success=False, method="API_REST", message=str(e),
-                order_type=order_type,
-            )
+            return ExecutionResult(success=False, method="API_REST", message=str(e))
 
     def flatten_all(self):
         if self._alpaca_client:
@@ -458,10 +324,8 @@ class UniversalOrderExecutor:
     Features:
       - Adapter routing: MT5 / API_REST / JSON_DUMP
       - FIFO Queue + 3.5s delay (HFT prevention)
-      - Retry: 1 retry on failure (skip retry on requote — requote = use new price)
+      - Retry: 1 retry on failure
       - Flatten signal: flatten_all() → adapter-specific
-      - Fill Quality Tracking: FillQualityTracker integration
-      - Pending Orders: MARKET / LIMIT / STOP / STOP_LIMIT support
     """
 
     ORDER_QUEUE_DELAY_SEC = 3.5
@@ -473,6 +337,16 @@ class UniversalOrderExecutor:
         if execution_method == "JSON_DUMP":
             self.adapter = JsonDumpAdapter(
                 signal_dir=kwargs.get("signal_dir", "./signals/")
+            )
+        elif execution_method == "MT5_PROXY":
+            # ── Linux → Windows VPS proxy → MT5 → FTMO
+            from mt5_proxy_client import Mt5ProxyAdapter
+            self.adapter = Mt5ProxyAdapter(
+                proxy_url=kwargs.get("mt5_proxy_url", ""),
+                api_key=kwargs.get("mt5_proxy_api_key", ""),
+                hmac_secret=kwargs.get("mt5_proxy_hmac_secret", ""),
+                unhealthy_callback=kwargs.get("mt5_unhealthy_cb"),
+                recovery_callback=kwargs.get("mt5_recovery_cb"),
             )
         elif execution_method == "MT5":
             self.adapter = Mt5Adapter()
@@ -492,18 +366,10 @@ class UniversalOrderExecutor:
         self._worker = threading.Thread(target=self._worker_loop, daemon=True, name="ExecWorker")
         self._worker.start()
 
-        # Fill Quality Tracker
-        try:
-            from trading_cost_manager import FillQualityTracker
-            self.fill_tracker = FillQualityTracker()
-        except ImportError:
-            self.fill_tracker = None
-
         # Health check adapter (Alpaca)
         self._health_client = None
 
-        logger.info(f"✅ UniversalExecutor ready | method={self.method} | "
-                     f"fill_tracking={'ON' if self.fill_tracker else 'OFF'}")
+        logger.info(f"✅ UniversalExecutor ready | method={self.method}")
 
     @classmethod
     def from_config(cls, cfg) -> "UniversalOrderExecutor":
@@ -513,6 +379,11 @@ class UniversalOrderExecutor:
             key, secret = cfg.get_alpaca_keys()
             kwargs["api_key"] = key
             kwargs["secret"]  = secret
+        elif cfg.EXECUTION_METHOD == "MT5_PROXY":
+            proxy_cfg = cfg.get_mt5_proxy_config()
+            kwargs.update(proxy_cfg)
+            kwargs["mt5_unhealthy_cb"] = getattr(cfg, "_mt5_unhealthy_cb", None)
+            kwargs["mt5_recovery_cb"]  = getattr(cfg, "_mt5_recovery_cb", None)
         return cls(execution_method=cfg.EXECUTION_METHOD, **kwargs)
 
     # ------------------------------------------
@@ -522,55 +393,22 @@ class UniversalOrderExecutor:
     def submit_order(
         self, symbol: str, side: str, size: float, sizing_unit: str,
         entry_price: float, stop_loss: float, take_profit: float,
-        metadata: dict = None, order_type: str = "MARKET",
+        metadata: dict = None,
     ) -> ExecutionResult:
-        """
-        Submit order with retry on failure.
-        Requotes skip retry (price already changed — need new signal).
-
-        Args:
-            order_type: "MARKET" | "LIMIT" | "STOP" | "STOP_LIMIT"
-        """
+        """Submit order with 1 retry on failure"""
         for attempt in range(1 + self.MAX_RETRIES):
             result = self.adapter.submit(
                 symbol, side, size, sizing_unit,
-                entry_price, stop_loss, take_profit, metadata,
-                order_type=order_type,
+                entry_price, stop_loss, take_profit, metadata
             )
-
-            # Record fill quality
-            if self.fill_tracker and result.intended_price > 0:
-                self.fill_tracker.record_fill(
-                    symbol         = symbol,
-                    intended_price = result.intended_price or entry_price,
-                    actual_price   = result.actual_fill or result.entry_price,
-                    retcode        = result.retcode,
-                    is_requote     = result.is_requote,
-                    fill_latency_ms = result.fill_latency_ms,
-                )
-
             if result.success:
                 return result
-
-            # Don't retry on requote — price has moved, need fresh signal
-            if result.is_requote:
-                logger.warning(
-                    f"[Executor] {symbol} REQUOTE — no retry (price moved)"
-                )
-                return result
-
             if attempt < self.MAX_RETRIES:
                 logger.warning(f"[Retry] {symbol} attempt {attempt+1} failed: {result.message}")
                 time.sleep(1.0)
 
         logger.error(f"[Executor] {symbol} FAILED after {1+self.MAX_RETRIES} attempts")
         return result
-
-    def get_fill_quality_report(self, symbol: str = None) -> dict:
-        """Get fill quality report from tracker"""
-        if self.fill_tracker:
-            return self.fill_tracker.get_report(symbol)
-        return {"fill_tracking": "disabled"}
 
     # ── Compatibility alias
     def submit_bracket_order(self, symbol, shares, side,

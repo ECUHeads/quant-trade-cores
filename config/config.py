@@ -108,7 +108,7 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "firm_name":            "FTMO",
         "account_label":        "$100K Challenge",
         "asset_class":          "CFD",
-        "execution_method":     "MT5",             # MetaTrader 5
+        "execution_method":     "MT5_PROXY",       # Linux → Windows Proxy → MT5 → FTMO
         "allow_fractional":     True,              # CFD lots can be 0.01
         "account_size_usd":     100_000.0,
         "max_buying_power":     100_000.0,
@@ -134,6 +134,26 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              0,
         "contract_multiplier":  100_000,           # 1 lot forex = 100K units
         "tick_size":            0.00001,            # 5 decimal forex
+
+        # ── MT5 Proxy Settings (Linux → Windows VPS bridge)
+        "mt5_proxy_url":         os.getenv("MT5_PROXY_URL", ""),
+        "mt5_proxy_api_key":     os.getenv("MT5_PROXY_API_KEY", ""),
+        "mt5_proxy_hmac_secret": os.getenv("MT5_PROXY_HMAC_SECRET", ""),
+
+        # ── FTMO Symbol Mapping: canonical engine name → MT5 broker name
+        "symbol_map": {
+            "EURUSD": "EURUSD",   "GBPUSD": "GBPUSD",   "USDJPY": "USDJPY",
+            "AUDUSD": "AUDUSD",   "USDCAD": "USDCAD",   "USDCHF": "USDCHF",
+            "NZDUSD": "NZDUSD",   "EURGBP": "EURGBP",   "EURJPY": "EURJPY",
+            "GBPJPY": "GBPJPY",   "EURCAD": "EURCAD",   "AUDCAD": "AUDCAD",
+            "US30":   "US30.cash",  "NAS100": "US100.cash",
+            "SPX500": "US500.cash", "GER40":  "GER40.cash",
+            "UK100":  "UK100.cash", "JPN225": "JP225.cash",
+            "XAUUSD": "XAUUSD",    "XAGUSD": "XAGUSD",
+            "USOIL":  "USOIL.cash", "UKOIL": "UKOIL.cash",
+            "BTCUSD": "BTCUSD",    "ETHUSD": "ETHUSD",
+            "LTCUSD": "LTCUSD",    "XRPUSD": "XRPUSD",
+        },
     },
 
     # ── Topstep — $50K Futures (NQ)
@@ -331,43 +351,6 @@ LLM_PROVIDERS = {
             "Content-Type": "application/json",
         },
     },
-
-    # ── Local / Open-Source LLM (Ollama, vLLM, llama.cpp, LM Studio)
-    #
-    # รัน Open LLM บน local machine เพื่อ:
-    #   - ลด latency (ไม่ต้องยิง API ผ่าน internet)
-    #   - ประหยัดค่า API (ใช้ GPU ที่มีอยู่)
-    #   - ทำงาน offline ได้ (dry-run / backtest)
-    #   - ความเป็นส่วนตัว (trade data ไม่ออกนอกเครื่อง)
-    #
-    # Supported backends:
-    #   Ollama:    http://localhost:11434  (set backend=OLLAMA)
-    #   vLLM:     http://localhost:8000/v1 (set backend=OPENAI_COMPAT)
-    #   llama.cpp: http://localhost:8080/v1 (set backend=OPENAI_COMPAT)
-    #   LM Studio: http://localhost:1234/v1 (set backend=OPENAI_COMPAT)
-    #
-    # Setup:
-    #   Ollama:  ollama pull qwen2.5:14b-instruct-q5_K_M
-    #   vLLM:    python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-14B-Instruct
-    #
-    # Env vars:
-    #   LOCAL_LLM_BASE_URL  — endpoint URL (default: Ollama localhost)
-    #   LOCAL_LLM_MODEL     — model name
-    #   LOCAL_LLM_BACKEND   — "OLLAMA" | "OPENAI_COMPAT"
-
-    "LOCAL_LLM": {
-        "api_key_env":  "LOCAL_LLM_API_KEY",      # ส่วนใหญ่ไม่ต้องใช้ key → ตั้ง "" ได้
-        "base_url":     os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434"),
-        "model":        os.getenv("LOCAL_LLM_MODEL",    "qwen2.5:14b-instruct-q5_K_M"),
-        "backend":      os.getenv("LOCAL_LLM_BACKEND",  "OLLAMA"),   # OLLAMA | OPENAI_COMPAT
-        "max_tokens":   2048,          # bilingual response ใช้ tokens มากขึ้น
-        "temperature":  0.1,
-        "timeout_sec":  int(os.getenv("LOCAL_LLM_TIMEOUT", "90")),  # R1 <think> ใช้เวลานาน
-        "headers_fn":   lambda key: {
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {key}"} if key else {}),
-        },
-    },
 }
 
 
@@ -437,10 +420,19 @@ def validate_profile(profile: dict) -> list[str]:
         )
 
     # Rule 6: execution_method
-    valid_methods = {"MT5", "API_REST", "JSON_DUMP"}
+    valid_methods = {"MT5", "MT5_PROXY", "API_REST", "JSON_DUMP"}
     em = profile.get("execution_method", "JSON_DUMP")
     if em not in valid_methods:
         errors.append(f"execution_method '{em}' not in {valid_methods}")
+
+    # Rule 10: MT5_PROXY ต้องมี proxy_url (warning, ไม่ block)
+    if em == "MT5_PROXY":
+        proxy_url = profile.get("mt5_proxy_url", "")
+        if not proxy_url:
+            errors.append(
+                "WARNING: execution_method=MT5_PROXY but mt5_proxy_url is empty. "
+                "Set env MT5_PROXY_URL or provide in profile."
+            )
 
     # Rule 7: asset_class
     if ac not in ASSET_CLASS_CONFIG:
@@ -492,31 +484,11 @@ class Config:
     BENZINGA_API_KEY    = os.getenv("BENZINGA_API_KEY",    "")
 
     # ── LLM Gate 19
-    LLM_PRIMARY         = os.getenv("LLM_PRIMARY",   "CLAUDE")   # CLAUDE | OPENAI | GEMINI | LOCAL_LLM
+    LLM_PRIMARY         = os.getenv("LLM_PRIMARY",   "CLAUDE")   # CLAUDE | OPENAI | GEMINI
     LLM_FALLBACK        = os.getenv("LLM_FALLBACK",  "OPENAI")   # fallback ถ้า primary fail
     LLM_ENABLED         = os.getenv("LLM_ENABLED", "true").lower() == "true"
     LLM_TIMEOUT_SEC     = 15
     LLM_FAIL_ACTION     = "ABORT"     # ABORT | EXECUTE (ถ้า LLM fail → default action)
-
-    # ── Local LLM Toggle
-    #    เปิด/ปิดแยกจาก cloud LLM — รองรับ dry-run, backtest, offline
-    #
-    #    Mode 1: Cloud + Local fallback
-    #      LLM_LOCAL_ENABLED=true  → chain: CLAUDE → OPENAI → LOCAL_LLM
-    #
-    #    Mode 2: Local primary
-    #      LLM_PRIMARY=LOCAL_LLM + LLM_LOCAL_ENABLED=true
-    #      → chain: LOCAL_LLM → OPENAI (fallback)
-    #
-    #    Mode 3: Local only (dry-run / offline / backtest)
-    #      LLM_LOCAL_ENABLED=true + LLM_LOCAL_ONLY=true
-    #      → chain: LOCAL_LLM เท่านั้น, ห้ามยิง cloud API
-    #
-    #    Mode 4: ปิด Local LLM
-    #      LLM_LOCAL_ENABLED=false (default)
-    #      → chain: ปกติไม่มี LOCAL_LLM
-    LLM_LOCAL_ENABLED   = os.getenv("LLM_LOCAL_ENABLED", "false").lower() == "true"
-    LLM_LOCAL_ONLY      = os.getenv("LLM_LOCAL_ONLY",    "false").lower() == "true"
 
     # ── Directories
     SIGNAL_DIR          = os.getenv("SIGNAL_DIR",  "./signals/")
@@ -536,14 +508,6 @@ class Config:
     ML_WATCHLIST        = ["NVDA", "TSLA", "META", "AAPL",
                            "AMZN", "MRNA", "NFLX", "AMD"]
     DAILY_HORIZEN_BAR_MIN = 2
-
-    # ── Worst Case Gate
-    WC_ENABLED            = True
-    WC_DANGER_THRESHOLD   = 0.45     # probability > 0.45 → VETO
-    WC_LOOKFORWARD_BARS   = 8        # 8 × 15m = 2 ชม. look-ahead (training)
-    WC_ATR_WHIPSAW_MULT   = 1.2      # Condition 1: whipsaw threshold
-    WC_ER_THRESHOLD       = 0.20     # Condition 2: Efficiency Ratio threshold
-    WC_MAE_MFE_RATIO      = 2.0      # Condition 3: MAE > 2 × MFE
 
     # ── Abuse Prevention (global defaults)
     ORDER_COOLDOWN_SEC  = 3.0
@@ -602,6 +566,12 @@ class Config:
     MIN_ADV              = 1_000_000
     CONTRACT_MULTIPLIER  = 1
     TICK_SIZE            = 0.01
+
+    # ── MT5 Proxy (FTMO bridge — Linux → Windows VPS → MT5)
+    MT5_PROXY_URL         = os.getenv("MT5_PROXY_URL", "")
+    MT5_PROXY_API_KEY     = os.getenv("MT5_PROXY_API_KEY", "")
+    MT5_PROXY_HMAC_SECRET = os.getenv("MT5_PROXY_HMAC_SECRET", "")
+    SYMBOL_MAP            = {}
 
     # ── Profile metadata
     _active_profile_name = None
@@ -695,6 +665,10 @@ class Config:
             "min_adv":              "MIN_ADV",
             "contract_multiplier":  "CONTRACT_MULTIPLIER",
             "tick_size":            "TICK_SIZE",
+            # ── MT5 Proxy fields
+            "mt5_proxy_url":        "MT5_PROXY_URL",
+            "mt5_proxy_api_key":    "MT5_PROXY_API_KEY",
+            "mt5_proxy_hmac_secret": "MT5_PROXY_HMAC_SECRET",
         }
 
         for profile_key, attr_name in MAPPING.items():
@@ -706,6 +680,16 @@ class Config:
             cls.FLATTEN_TIME_ET = tuple(profile["flatten_time_et"])
         if "no_new_entry_after" in profile:
             cls.NO_NEW_ENTRY_AFTER = tuple(profile["no_new_entry_after"])
+
+        # ── Special: symbol_map (dict, not scalar)
+        if "symbol_map" in profile:
+            cls.SYMBOL_MAP = profile["symbol_map"]
+
+        # ── Special: MT5 Proxy — re-read from env at runtime
+        if cls.EXECUTION_METHOD == "MT5_PROXY":
+            cls.MT5_PROXY_URL         = os.getenv("MT5_PROXY_URL", "")         or cls.MT5_PROXY_URL
+            cls.MT5_PROXY_API_KEY     = os.getenv("MT5_PROXY_API_KEY", "")     or cls.MT5_PROXY_API_KEY
+            cls.MT5_PROXY_HMAC_SECRET = os.getenv("MT5_PROXY_HMAC_SECRET", "") or cls.MT5_PROXY_HMAC_SECRET
 
         cls._active_profile_name = name
         cls._active_profile_raw  = profile
@@ -747,6 +731,15 @@ class Config:
             secret = cls.ALPACA_PAPER_SECRET or cls.ALPACA_LIVE_SECRET
         return key, secret
 
+    @classmethod
+    def get_mt5_proxy_config(cls) -> dict:
+        """คืน MT5 Proxy config สำหรับ Mt5ProxyAdapter"""
+        return {
+            "mt5_proxy_url":        cls.MT5_PROXY_URL,
+            "mt5_proxy_api_key":    cls.MT5_PROXY_API_KEY,
+            "mt5_proxy_hmac_secret": cls.MT5_PROXY_HMAC_SECRET,
+        }
+
     # ══════════════════════════════════════════════════════════
     # VALIDATION
     # ══════════════════════════════════════════════════════════
@@ -784,34 +777,36 @@ class Config:
 
         # ── ตรวจ LLM keys
         if cls.LLM_ENABLED:
-            # ── Local LLM check
-            if cls.LLM_LOCAL_ENABLED or cls.LLM_PRIMARY == "LOCAL_LLM":
-                local_cfg = LLM_PROVIDERS.get("LOCAL_LLM", {})
-                logger.info(
-                    f"[Config] Local LLM enabled | "
-                    f"backend={local_cfg.get('backend', '?')} | "
-                    f"model={local_cfg.get('model', '?')} | "
-                    f"url={local_cfg.get('base_url', '?')}"
+            primary_cfg  = LLM_PROVIDERS.get(cls.LLM_PRIMARY, {})
+            fallback_cfg = LLM_PROVIDERS.get(cls.LLM_FALLBACK, {})
+
+            primary_key  = os.getenv(primary_cfg.get("api_key_env", ""), "")
+            fallback_key = os.getenv(fallback_cfg.get("api_key_env", ""), "")
+
+            if not primary_key and not fallback_key:
+                logger.warning(
+                    f"[Config] Gate 19 LLM enabled but no API keys found "
+                    f"({cls.LLM_PRIMARY} / {cls.LLM_FALLBACK}). "
+                    f"Gate 19 will {cls.LLM_FAIL_ACTION} all trades."
                 )
-                if cls.LLM_LOCAL_ONLY:
-                    logger.info(
-                        "[Config] LLM_LOCAL_ONLY=true → cloud API disabled"
-                    )
 
-            # ── Cloud LLM key check (skip ถ้า local-only mode)
-            if not cls.LLM_LOCAL_ONLY:
-                primary_cfg  = LLM_PROVIDERS.get(cls.LLM_PRIMARY, {})
-                fallback_cfg = LLM_PROVIDERS.get(cls.LLM_FALLBACK, {})
-
-                primary_key  = os.getenv(primary_cfg.get("api_key_env", ""), "")
-                fallback_key = os.getenv(fallback_cfg.get("api_key_env", ""), "")
-
-                if not primary_key and not fallback_key and cls.LLM_PRIMARY != "LOCAL_LLM":
-                    logger.warning(
-                        f"[Config] Gate 19 LLM enabled but no API keys found "
-                        f"({cls.LLM_PRIMARY} / {cls.LLM_FALLBACK}). "
-                        f"Gate 19 will {cls.LLM_FAIL_ACTION} all trades."
-                    )
+        # ── ตรวจ MT5 Proxy keys (สำหรับ FTMO)
+        if cls.EXECUTION_METHOD == "MT5_PROXY":
+            if not cls.MT5_PROXY_URL:
+                logger.warning(
+                    "[Config] execution_method=MT5_PROXY but MT5_PROXY_URL is empty.\n"
+                    "   Set: export MT5_PROXY_URL='https://your-windows-vps:8500'"
+                )
+            if not cls.MT5_PROXY_API_KEY:
+                logger.warning(
+                    "[Config] MT5_PROXY_API_KEY not set.\n"
+                    "   Set: export MT5_PROXY_API_KEY='your-secure-key'"
+                )
+            if mode == "live" and not cls.MT5_PROXY_URL:
+                raise EnvironmentError(
+                    "Cannot run LIVE with MT5_PROXY without MT5_PROXY_URL!\n"
+                    "Set: export MT5_PROXY_URL='https://your-windows-vps:8500'"
+                )
 
         # ── สร้าง directories
         for d in [cls.SIGNAL_DIR, cls.JOURNAL_DIR, cls.MODEL_DIR, cls.PROFILE_DIR]:
@@ -869,23 +864,13 @@ class Config:
     @classmethod
     def summary(cls) -> str:
         """One-line summary ของ active config"""
-        if not cls.LLM_ENABLED:
-            llm_status = 'OFF'
-        elif cls.LLM_LOCAL_ONLY:
-            local_model = LLM_PROVIDERS.get("LOCAL_LLM", {}).get("model", "?")
-            llm_status = f'LOCAL_ONLY({local_model})'
-        elif cls.LLM_LOCAL_ENABLED:
-            llm_status = f'ON+LOCAL({cls.LLM_PRIMARY})'
-        else:
-            llm_status = f'ON({cls.LLM_PRIMARY})'
-
         return (
             f"[{cls._active_profile_name or 'default'}] "
             f"{cls.FIRM_NAME} {cls.ASSET_CLASS} | "
             f"${cls.ACCOUNT_SIZE_USD:,.0f} | "
             f"risk=${cls.RISK_PER_TRADE_USD:.0f}/trade | "
             f"exec={cls.EXECUTION_METHOD} | "
-            f"LLM={llm_status}"
+            f"LLM={'ON' if cls.LLM_ENABLED else 'OFF'}"
         )
 
 

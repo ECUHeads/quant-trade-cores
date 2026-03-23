@@ -4,7 +4,7 @@ main.py
 Universal 15m Quant Engine — Event-Driven Orchestrator
 
 Pipeline (per 15m candle close):
-  Data Fetch → ML Gate 6 → Risk Gate 1-7 → WC Gate → LLM CIO Gate 19 → Executor
+  Data Fetch → ML Gate 6 → Risk Gate 1-7 → LLM CIO Gate 19 → Executor
 
 Loop Timing:
   ตื่นเฉพาะนาทีที่ 00, 15, 30, 45 (cron-style)
@@ -17,29 +17,11 @@ Session Control:
 Timezone:
   ใช้ ZoneInfo("America/New_York") — DST-aware
 
-Modes:
-  paper   — ข้อมูลจริง, ไม่สั่ง order จริง (MockExecutor)
-  live    — ข้อมูลจริง, สั่ง order จริง (ต้อง confirm)
-  shadow  — ข้อมูลจริง, รันทุก gate แบบ non-blocking, ไม่สั่ง order
-             บันทึกผลทุก gate → console + JSON report
-
 Usage:
   python main.py --profile TTP_5K_FLEX --mode paper
   python main.py --profile FTMO_100K --mode live
   python main.py --profile TTP_5K_FLEX --dry-run
   python main.py --report
-
-  # Shadow mode
-  python main.py --mode shadow                                     # one-shot
-  python main.py --mode shadow --live-shadow                       # live continuous
-  python main.py --mode shadow --skip-gates gate19,session         # skip gates
-  python main.py --mode shadow --shadow-symbols NVDA,TSLA,META     # specific symbols
-  python main.py --mode shadow --shadow-watchlist ./universe.json  # from file
-
-  # Technical Scanner (dual-trigger: news + indicator)
-  python main.py --mode paper --enable-tech-scan
-  python main.py --mode live --enable-tech-scan
-  python main.py --mode shadow --enable-tech-scan --skip-gates gate19
 """
 
 import os
@@ -49,7 +31,6 @@ import logging
 import argparse
 import threading
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -59,13 +40,6 @@ from ext_data.news_scanner import (NewsScanner, NewsCandidate,
                            MarketSessionFilter, CatalystClassifier)
 from orders.trade_journal import TradeJournal, TradeRecord
 from gates.gate_19_llm_cio import Gate19LLMCio, CIOVerdict
-
-# ── Worst Case Detector (optional)
-try:
-    from models.worst_case_detector import WorstCaseGate, WorstCaseVerdict
-except ImportError:
-    WorstCaseGate = None
-    WorstCaseVerdict = None
 
 # ── Third-party (optional)
 try:
@@ -169,13 +143,6 @@ def _load_executor():
     except ImportError:
         return None
 
-def _load_wc_gate():
-    try:
-        from models.worst_case_detector import WorstCaseGate
-        return WorstCaseGate
-    except ImportError:
-        return None
-
 
 # ============================================================
 # MOCK CLASSES (dry-run / missing modules)
@@ -203,51 +170,6 @@ class MockExecutor:
     def flush_queue(self): return 0
 
 
-class DryRunExecutor:
-    """
-    Wrapper รอบ Alpaca executor จริง
-    - READ operations (health, positions, account) → ส่งต่อให้ real executor
-    - WRITE operations (submit order, flatten) → mock / log เท่านั้น
-    """
-    def __init__(self, real_executor):
-        self._real = real_executor
-        logger.info("[DryRunExecutor] Wrapped real Alpaca — read=REAL, write=MOCK")
-
-    def check_system_health(self, **kw):
-        try:
-            result = self._real.check_system_health(**kw)
-            logger.info(f"[DRY] Health (REAL Alpaca): {result}")
-            return result
-        except Exception as e:
-            logger.warning(f"[DRY] Health fallback: {e}")
-            return {"status": "OK", "today_pnl": 0.0, "buying_power": 80_000.0}
-
-    def get_open_positions(self):
-        try:
-            return self._real.get_open_positions()
-        except Exception:
-            return []
-
-    def submit_bracket_order(self, symbol, shares, side, stop_loss_price,
-                              take_profit_price, **kw):
-        entry = kw.get("entry_price", 0)
-        logger.info(
-            f"[DRY] ORDER (NOT SENT) → {side} {shares}x {symbol} "
-            f"@ {entry} SL={stop_loss_price} TP={take_profit_price}"
-        )
-        class _O: id = f"DRY-{time.time():.0f}"; status = "dry_run"
-        return _O()
-
-    def flatten_all_positions(self):
-        logger.info("[DRY] FLATTEN (NOT SENT)")
-
-    def flush_queue(self):
-        try:
-            return self._real.flush_queue()
-        except Exception:
-            return 0
-
-
 # ============================================================
 # TRADING PIPELINE
 # ============================================================
@@ -273,7 +195,6 @@ class TradingPipeline:
       Gate H:  No hedge
       Gate I:  Streak escalation (session-based)
       Gate 7:  UniversalRiskManager (ATR-based SL/TP)
-      Gate WC: WorstCaseDetector (Whipsaw/Chop/MAE Veto)
       Gate 19: LLM CIO (EXECUTE/REDUCE/DELAY/ABORT)
       →        UniversalOrderExecutor
       →        TradeJournal
@@ -326,19 +247,17 @@ class TradingPipeline:
         self.risk = RM.from_config(self.cfg) if RM else None
 
         # 4. Executor
-        EX = _load_executor()
         if self.dry_run:
+            self.executor = MockExecutor()
+        else:
+            EX = _load_executor()
             if EX:
-                try:
-                    real_ex = EX.from_config(self.cfg)
-                    self.executor = DryRunExecutor(real_ex)
-                except Exception as e:
-                    logger.warning(f"[DRY] ไม่สามารถเชื่อม Alpaca: {e} → fallback MockExecutor")
-                    self.executor = MockExecutor()
+                # ── MT5 Proxy: inject LINE/Telegram alert callbacks ก่อนสร้าง executor
+                if self.cfg.EXECUTION_METHOD == "MT5_PROXY":
+                    self._setup_mt5_proxy_alerts()
+                self.executor = EX.from_config(self.cfg)
             else:
                 self.executor = MockExecutor()
-        else:
-            self.executor = EX.from_config(self.cfg) if EX else MockExecutor()
 
         # 5. Trade Journal
         self.journal = TradeJournal(output_dir=self.cfg.JOURNAL_DIR)
@@ -359,21 +278,59 @@ class TradingPipeline:
         # 8. Gate 19 LLM CIO
         self.gate19 = Gate19LLMCio()
 
-        # 9. Worst Case Gate (Toxic Market Veto)
-        WCG = _load_wc_gate()
-        if WCG:
-            self.wc_gate = WCG(
-                model_dir=self.cfg.MODEL_DIR,
-                danger_threshold=getattr(self.cfg, "WC_DANGER_THRESHOLD", 0.45),
-            )
-            logger.info("🛡️ Worst Case Gate loaded")
-        else:
-            self.wc_gate = None
-
-        # 10. Technical Scanner (disabled by default, --enable-tech-scan)
-        self.tech_scanner = None  # set by run_live/run_shadow if enabled
-
         logger.info("✅ All modules loaded")
+
+    # ------------------------------------------
+    # MT5 PROXY: Alert Callbacks
+    # ------------------------------------------
+
+    def _setup_mt5_proxy_alerts(self):
+        """
+        เพิ่ม LINE/Telegram alert callbacks เมื่อ MT5 disconnect/reconnect
+        ถูกเรียกก่อนสร้าง Executor — inject callbacks เข้า Config
+        """
+        def on_mt5_unhealthy(status):
+            msg = (
+                f"🚨 MT5 PROXY UNHEALTHY\n"
+                f"Orders BLOCKED until recovery\n"
+                f"Status: {status.get('status', 'UNKNOWN')}\n"
+                f"Reconnects: {status.get('reconnect_count', '?')}"
+            )
+            logger.critical(msg)
+            try:
+                from notifier_line import send_alert_message
+                send_alert_message(msg)
+            except Exception:
+                pass
+            try:
+                from notifier_telegram import send_alert_telegram
+                send_alert_telegram(msg)
+            except Exception:
+                pass
+
+        def on_mt5_recovery(status):
+            acct = status.get("account", {})
+            msg = (
+                f"✅ MT5 PROXY RECOVERED\n"
+                f"Orders RESUMED\n"
+                f"Balance: ${acct.get('balance', 0):,.2f}\n"
+                f"Equity: ${acct.get('equity', 0):,.2f}"
+            )
+            logger.info(msg)
+            try:
+                from notifier_line import send_alert_message
+                send_alert_message(msg)
+            except Exception:
+                pass
+            try:
+                from notifier_telegram import send_alert_telegram
+                send_alert_telegram(msg)
+            except Exception:
+                pass
+
+        self.cfg._mt5_unhealthy_cb = on_mt5_unhealthy
+        self.cfg._mt5_recovery_cb  = on_mt5_recovery
+        logger.info("🔗 MT5 Proxy alert callbacks registered (LINE + Telegram)")
 
     # ------------------------------------------
     # MAIN ENTRY: Process News Candidate
@@ -407,30 +364,22 @@ class TradingPipeline:
             return
 
         # ── GATE 2: Session + No-New-Entry after cutoff
-        if self.dry_run:
-            session = "MARKET"
-            logger.info(f"  [DRY] bypass Gate 2 → session={session}")
-        else:
-            session = self.session_filter.current_session()
-            if not self.session_filter.is_tradeable(session, candidate.catalyst_type):
-                logger.info(f"⏸ {sym} session={session} → skip")
-                return
+        session = self.session_filter.current_session()
+        if not self.session_filter.is_tradeable(session, candidate.catalyst_type):
+            logger.info(f"⏸ {sym} session={session} → skip")
+            return
 
-            h_cut, m_cut = self.cfg.NO_NEW_ENTRY_AFTER
-            t = now_et()
-            if t.hour > h_cut or (t.hour == h_cut and t.minute >= m_cut):
-                logger.info(f"⏸ No New Entry after {h_cut}:{m_cut:02d} ET → skip")
-                return
+        h_cut, m_cut = self.cfg.NO_NEW_ENTRY_AFTER
+        t = now_et()
+        if t.hour > h_cut or (t.hour == h_cut and t.minute >= m_cut):
+            logger.info(f"⏸ No New Entry after {h_cut}:{m_cut:02d} ET → skip")
+            return
 
         # ── GATE 3: Sentiment
-        if self.dry_run:
-            sentiment = {"sentiment_score": 0.70, "vix": 16.0}
-            logger.info(f"  [DRY] bypass Gate 3 → mock sentiment={sentiment['sentiment_score']}")
-        else:
-            sentiment = self._get_market_sentiment()
-            if sentiment["sentiment_score"] < 0.35:
-                logger.warning(f"🚫 Sentiment {sentiment['sentiment_score']:.2f} too low")
-                return
+        sentiment = self._get_market_sentiment()
+        if sentiment["sentiment_score"] < 0.35:
+            logger.warning(f"🚫 Sentiment {sentiment['sentiment_score']:.2f} too low")
+            return
 
         # ── GATE 4: Price
         price = self._fetch_price(sym)
@@ -444,47 +393,21 @@ class TradingPipeline:
                 return
 
         # ── GATE 6: Regime Scorer
-        if self.dry_run:
-            score_result = {"Final_Weighted_Score": 72, "Raw_Score_Momentum": 70,
-                            "Raw_Score_MeanRev": 55, "Action_Signal": "🟢 BUY"}
-            regime_score = score_result["Final_Weighted_Score"]
-            logger.info(f"  [DRY] bypass Gate 6 → mock regime={regime_score}")
-        else:
-            score_result = self._score_stock(sym, sentiment)
-            regime_score = score_result.get("Final_Weighted_Score", 0)
-            if regime_score < 50:
-                logger.info(f"⛔ {sym} regime={regime_score} < 50")
-                return
+        score_result = self._score_stock(sym, sentiment)
+        regime_score = score_result.get("Final_Weighted_Score", 0)
+        if regime_score < 50:
+            logger.info(f"⛔ {sym} regime={regime_score} < 50")
+            return
 
-        # ── GATE ML: ML Analyzer (ก่อน side — เพื่อให้ 3-class กำหนดทิศทาง)
+        # ── Side
+        side = self._determine_side(candidate.catalyst_type)
+
+        # ── GATE ML: ML Analyzer
         ml_prediction = self._run_ml_gate(sym, candidate.catalyst_type,
                                            candidate.urgency_score, session)
         if ml_prediction and ml_prediction.ml_score < self.cfg.ML_SCORE_MIN:
             logger.info(f"⛔ ML {sym} score={ml_prediction.ml_score} < {self.cfg.ML_SCORE_MIN}")
             return
-
-        # ── Side: ให้ ML 3-class กำหนด, fallback catalyst
-        catalyst_side = self._determine_side(candidate.catalyst_type)
-
-        if ml_prediction and ml_prediction.signal != "NEUTRAL":
-            ml_side = "buy" if ml_prediction.signal == "LONG" else "sell"
-            if ml_side != catalyst_side:
-                logger.info(
-                    f"⚠️ ML override: ML={ml_prediction.signal} vs catalyst={catalyst_side.upper()} "
-                    f"| class={ml_prediction.predicted_class:+d} "
-                    f"P(sell={ml_prediction.class_probs['sell']:.2f} "
-                    f"neu={ml_prediction.class_probs['neutral']:.2f} "
-                    f"buy={ml_prediction.class_probs['buy']:.2f}) "
-                    f"conf={ml_prediction.confidence:.2f} → ใช้ ML"
-                )
-            side = ml_side
-        else:
-            side = catalyst_side
-            if ml_prediction:
-                logger.info(
-                    f"  ML={ml_prediction.signal} (class={ml_prediction.predicted_class:+d}) "
-                    f"→ fallback catalyst side={side}"
-                )
 
         combined_score = regime_score
         if ml_prediction:
@@ -550,74 +473,40 @@ class TradingPipeline:
             shares = 10  # fallback
 
         # ══════════════════════════════════════════════════════
-        # GATE WC: Worst Case Detector — Toxic Market Veto
-        # ══════════════════════════════════════════════════════
-        if self.wc_gate and getattr(self.cfg, "WC_ENABLED", True):
-            df_15m = self._fetch_15m_bars(sym, bars=30)
-            if df_15m is not None and len(df_15m) >= 20:
-                wc_verdict = self.wc_gate.evaluate(
-                    symbol=sym, df_15m=df_15m, atr=atr,
-                )
-                if wc_verdict.is_danger:
-                    logger.warning(
-                        f"🛡️ Gate WC VETO {sym} | "
-                        f"danger={wc_verdict.danger_score:.3f} | "
-                        f"top={wc_verdict.top_features[:3]} | "
-                        f"{wc_verdict.latency_ms}ms"
-                    )
-                    return
-
-        # ══════════════════════════════════════════════════════
         # GATE 19: LLM CIO — Final Risk Veto
         # ══════════════════════════════════════════════════════
-        if self.dry_run:
-            verdict = CIOVerdict(
-                action="EXECUTE", sizing_multiplier=1.0,
-                reasoning="DRY-RUN mock — auto EXECUTE",
-                provider="DRY_RUN", latency_ms=0,
-            )
-            logger.info(f"  [DRY] bypass Gate 19 → mock verdict=EXECUTE")
-        else:
-            intraday = self._fetch_intraday_context(sym)
-            verdict = self.gate19.evaluate_trade(
-                market_data={
-                    "symbol": sym, "price": price,
-                    "prev_close": intraday["prev_close"],
-                    "vwap": intraday["vwap"],
-                    "day_high": intraday["day_high"],
-                    "day_low": intraday["day_low"],
-                    "atr_15m": atr, "vix": sentiment.get("vix", 20),
-                    "spy_trend": "up" if sentiment["sentiment_score"] > 0.5 else "down",
-                    "session": session,
-                    "timeframe": self.cfg.TIMEFRAME,
-                },
-                ml_signal={
-                    "ml_score": ml_prediction.ml_score if ml_prediction else int(regime_score),
-                    "direction_prob": ml_prediction.direction_prob if ml_prediction else 0.5,
-                    "confidence": ml_prediction.confidence if ml_prediction else 0.5,
-                    "signal": ml_prediction.signal if ml_prediction else side.upper(),
-                    "predicted_class": ml_prediction.predicted_class if ml_prediction else 0,
-                    "class_probs": ml_prediction.class_probs if ml_prediction else {},
-                    "top_features": (ml_prediction.top_features if ml_prediction else []),
-                },
-                risk_data={
-                    "shares": shares, "entry": entry_price,
-                    "stop_loss": stop_price, "take_profit": target_price,
-                    "risk_usd": order_spec.get("actual_risk_usd", 0) if self.risk else 0,
-                    "daily_pnl": self._today_pnl,
-                    "daily_loss_limit": self.cfg.MAX_DAILY_LOSS_USD,
-                    "trades_today": self._daily_order_count,
-                    "consecutive_losses": self.journal.compute_daily_streak(),
-                },
-                config_rules={
-                    "firm_name": self.cfg.FIRM_NAME,
-                    "max_daily_loss": self.cfg.MAX_DAILY_LOSS_USD,
-                    "max_orders_per_day": self.cfg.MAX_ORDERS_PER_DAY,
-                    "streak_block": self.cfg.STREAK_BLOCK,
-                    "consistency_rule": self.cfg.CONSISTENCY_RULE_PCT,
-                },
-                news_context=f"{candidate.catalyst_type}: {candidate.headline[:120]}",
-            )
+        verdict = self.gate19.evaluate_trade(
+            market_data={
+                "symbol": sym, "price": price,
+                "vwap": 0, "atr_15m": atr, "vix": sentiment.get("vix", 20),
+                "spy_trend": "up" if sentiment["sentiment_score"] > 0.5 else "down",
+                "session": session,
+            },
+            ml_signal={
+                "ml_score": ml_prediction.ml_score if ml_prediction else int(regime_score),
+                "direction_prob": ml_prediction.direction_prob if ml_prediction else 0.5,
+                "confidence": ml_prediction.confidence if ml_prediction else 0.5,
+                "signal": side.upper(),
+                "top_features": (ml_prediction.top_features if ml_prediction else []),
+            },
+            risk_data={
+                "shares": shares, "entry": entry_price,
+                "stop_loss": stop_price, "take_profit": target_price,
+                "risk_usd": order_spec.get("actual_risk_usd", 0) if self.risk else 0,
+                "daily_pnl": self._today_pnl,
+                "daily_loss_limit": self.cfg.MAX_DAILY_LOSS_USD,
+                "trades_today": self._daily_order_count,
+                "consecutive_losses": self.journal.compute_daily_streak(),
+            },
+            config_rules={
+                "firm_name": self.cfg.FIRM_NAME,
+                "max_daily_loss": self.cfg.MAX_DAILY_LOSS_USD,
+                "max_orders_per_day": self.cfg.MAX_ORDERS_PER_DAY,
+                "streak_block": self.cfg.STREAK_BLOCK,
+                "consistency_rule": self.cfg.CONSISTENCY_RULE_PCT,
+            },
+            news_context=f"{candidate.catalyst_type}: {candidate.headline[:120]}",
+        )
 
         # ── Apply CIO verdict
         if not verdict.is_go():
@@ -663,13 +552,7 @@ class TradingPipeline:
         # ── Journal
         ml_notes = f"cio={verdict.action} mult={verdict.sizing_multiplier} "
         if ml_prediction:
-            ml_notes += (
-                f"ml={ml_prediction.ml_score} conf={ml_prediction.confidence:.2f} "
-                f"class={ml_prediction.predicted_class:+d} sig={ml_prediction.signal} "
-                f"P(s={ml_prediction.class_probs['sell']:.2f} "
-                f"n={ml_prediction.class_probs['neutral']:.2f} "
-                f"b={ml_prediction.class_probs['buy']:.2f})"
-            )
+            ml_notes += f"ml={ml_prediction.ml_score} conf={ml_prediction.confidence:.2f}"
 
         trade_id = self.journal.open_trade(
             symbol=sym, side=side, catalyst_type=candidate.catalyst_type,
@@ -687,15 +570,10 @@ class TradingPipeline:
         )
         self._open_trades[sym] = trade_id
 
-        ml_class_info = ""
-        if ml_prediction:
-            ml_class_info = f" | ML={ml_prediction.signal}({ml_prediction.predicted_class:+d})"
-
         logger.info(
             f"✅ TRADE [{trade_id}] {side.upper()} {adjusted_shares}x {sym} "
             f"@ {entry_price:.2f} SL={stop_price:.2f} TP={target_price:.2f} "
-            f"| Gate19={verdict.action}{ml_class_info} "
-            f"| orders={self._daily_order_count}/{self.cfg.MAX_ORDERS_PER_DAY}"
+            f"| Gate19={verdict.action} | orders={self._daily_order_count}/{self.cfg.MAX_ORDERS_PER_DAY}"
         )
 
     # ------------------------------------------
@@ -731,13 +609,29 @@ class TradingPipeline:
             return {"sentiment_score": 0.5, "vix": 20.0}
 
     def _fetch_price(self, symbol: str) -> Optional[float]:
-        """ดึงราคาล่าสุดจาก Alpaca snapshot → yfinance fallback"""
-        # ── Try snapshot cache from tiered scan
+        """ดึงราคาล่าสุด — route ตาม asset class"""
+        # ── CFD/Forex: ดึงจาก MT5 Proxy
+        if self.cfg.is_cfd() and hasattr(self.executor, 'adapter') and hasattr(self.executor.adapter, 'get_tick'):
+            try:
+                tick = self.executor.adapter.get_tick(symbol)
+                if tick and tick.get("bid", 0) > 0:
+                    mid = (tick["bid"] + tick["ask"]) / 2
+                    return float(mid)
+            except Exception as e:
+                logger.debug(f"MT5 tick failed for {symbol}: {e}")
+            try:
+                info = self.executor.adapter.get_symbol_info(symbol)
+                if info and info.get("bid", 0) > 0:
+                    return float((info["bid"] + info["ask"]) / 2)
+            except Exception:
+                pass
+            return None
+
+        # ── Equities: Alpaca snapshot → yfinance fallback (เดิม)
         if self._tiers and self._tiers.snapshot.get(symbol):
             p = self._tiers.snapshot[symbol].get("price", 0)
             if p > 0:
                 return float(p)
-        # ── Alpaca snapshot (single)
         try:
             from data_pipeline_manager import get_alpaca_snapshots
             snaps = get_alpaca_snapshots([symbol])
@@ -745,7 +639,6 @@ class TradingPipeline:
                 return float(snaps[symbol]["price"])
         except Exception:
             pass
-        # ── yfinance fallback
         try:
             if yf:
                 info = yf.Ticker(symbol).fast_info
@@ -756,7 +649,20 @@ class TradingPipeline:
         return None
 
     def _fetch_prev_close(self, symbol: str) -> float:
-        """ดึง previous close จาก snapshot cache → yfinance fallback"""
+        """ดึง previous close — route ตาม asset class"""
+        # ── CFD/Forex: ดึง 1D bar ล่าสุดจาก MT5
+        if self.cfg.is_cfd() and hasattr(self.executor, 'adapter') and hasattr(self.executor.adapter, 'get_bars'):
+            try:
+                bars = self.executor.adapter.get_bars(symbol, timeframe="1d", count=2)
+                if bars and len(bars) >= 2:
+                    return float(bars[-2]["close"])
+                elif bars and len(bars) == 1:
+                    return float(bars[0]["close"])
+            except Exception as e:
+                logger.debug(f"MT5 prev_close failed for {symbol}: {e}")
+            return 0.0
+
+        # ── Equities (เดิม)
         if self._tiers and self._tiers.snapshot.get(symbol):
             pc = self._tiers.snapshot[symbol].get("prev_close", 0)
             if pc > 0:
@@ -769,6 +675,20 @@ class TradingPipeline:
         return 0.0
 
     def _fetch_atr_15m(self, symbol: str) -> float:
+        """ดึง ATR 15m — route ตาม asset class"""
+        # ── CFD/Forex: ดึง 15m bars จาก MT5 แล้วคำนวณ ATR
+        if self.cfg.is_cfd() and hasattr(self.executor, 'adapter') and hasattr(self.executor.adapter, 'get_bars'):
+            try:
+                bars = self.executor.adapter.get_bars(symbol, timeframe="15m", count=50)
+                if bars and len(bars) >= 14:
+                    atr = self._compute_atr_from_bars(bars, period=14)
+                    if atr > 0:
+                        return atr
+            except Exception as e:
+                logger.debug(f"MT5 ATR failed for {symbol}: {e}")
+            return 0.0
+
+        # ── Equities (เดิม)
         try:
             from data_pipeline_manager import safe_download, compute_atr_15m
             df = safe_download(symbol, period="5d", interval="15m")
@@ -781,82 +701,22 @@ class TradingPipeline:
             pass
         return 0.0
 
-    def _fetch_intraday_context(self, symbol: str) -> dict:
-        """
-        ดึง VWAP, day_high, day_low, prev_close จาก 15m data
-        ใช้ส่งให้ Gate 19 LLM เพื่อวิเคราะห์ entry/TP/period ได้แม่นยำ
-
-        Returns:
-            {"vwap": float, "day_high": float, "day_low": float, "prev_close": float}
-        """
-        result = {"vwap": 0.0, "day_high": 0.0, "day_low": 0.0, "prev_close": 0.0}
-        try:
-            from data_pipeline_manager import safe_download, compute_vwap
-            df = safe_download(symbol, period="5d", interval="15m")
-            if df.empty or len(df) < 5:
-                return result
-
-            # ── VWAP (latest value)
-            vwap_series = compute_vwap(df)
-            if not vwap_series.empty:
-                result["vwap"] = round(float(vwap_series.iloc[-1]), 2)
-
-            # ── Day high/low (today's bars only)
-            if hasattr(df.index, 'date'):
-                try:
-                    idx = df.index
-                    if hasattr(idx, 'tz') and idx.tz is not None:
-                        today = idx.tz_localize(None).date[-1]
-                        dates = idx.tz_localize(None).date
-                    else:
-                        today = idx.date[-1]
-                        dates = idx.date
-                    today_mask = [d == today for d in dates]
-                    today_df = df[today_mask]
-                    if not today_df.empty:
-                        result["day_high"] = round(float(today_df["high"].max()), 2)
-                        result["day_low"]  = round(float(today_df["low"].min()), 2)
-                except Exception:
-                    result["day_high"] = round(float(df["high"].iloc[-20:].max()), 2)
-                    result["day_low"]  = round(float(df["low"].iloc[-20:].min()), 2)
-
-            # ── Prev close
-            result["prev_close"] = self._fetch_prev_close(symbol)
-
-        except Exception as e:
-            logger.debug(f"[{symbol}] _fetch_intraday_context error: {e}")
-
-        return result
-
-    def _fetch_15m_bars(self, symbol: str, bars: int = 30) -> Optional["pd.DataFrame"]:
-        """ดึง 15m OHLCV bars สำหรับ Worst Case Gate"""
-        if yf is None or pd is None:
-            return None
-        try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period="3d", interval="15m")
-            if df.empty:
-                return None
-            df.columns = [c.lower() for c in df.columns]
-            return df.tail(bars)
-        except Exception as e:
-            logger.warning(f"[WC] Failed to fetch 15m bars {symbol}: {e}")
-            return None
-
-    def _fetch_15m_data_for_train(self, symbol: str, days: int = 60) -> Optional["pd.DataFrame"]:
-        """ดึง 15m OHLCV bars สำหรับ Worst Case training (ข้อมูลยาว)"""
-        if yf is None or pd is None:
-            return None
-        try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period=f"{days}d", interval="15m")
-            if df.empty:
-                return None
-            df.columns = [c.lower() for c in df.columns]
-            return df
-        except Exception as e:
-            logger.warning(f"[WC-Train] Failed to fetch {symbol} {days}d: {e}")
-            return None
+    @staticmethod
+    def _compute_atr_from_bars(bars: list[dict], period: int = 14) -> float:
+        """คำนวณ ATR จาก list of bar dicts (จาก MT5 proxy)"""
+        if len(bars) < period + 1:
+            return 0.0
+        true_ranges = []
+        for i in range(1, len(bars)):
+            h = bars[i]["high"]
+            l = bars[i]["low"]
+            pc = bars[i - 1]["close"]
+            tr = max(h - l, abs(h - pc), abs(l - pc))
+            true_ranges.append(tr)
+        if len(true_ranges) < period:
+            return 0.0
+        atr = sum(true_ranges[-period:]) / period
+        return round(atr, 6)
 
     def _score_stock(self, symbol: str, sentiment: dict) -> dict:
         try:
@@ -920,23 +780,6 @@ class TradingPipeline:
             )
 
         logger.info(f"  Pre-Market done: {self._tiers.summary()}")
-
-        # ── Step 3: Train Worst Case models (piggyback daily retrain)
-        if self.wc_gate and self._tiers:
-            trainable = list(self._tiers.trainable)
-            wc_trained = 0
-            for sym in trainable:
-                if not self.wc_gate.registry.needs_retrain(sym):
-                    continue
-                try:
-                    df_15m = self._fetch_15m_data_for_train(sym, days=60)
-                    if df_15m is not None and len(df_15m) >= 200:
-                        auc = self.wc_gate.train_symbol(sym, df_15m)
-                        if auc > 0:
-                            wc_trained += 1
-                except Exception as e:
-                    logger.warning(f"[WC-Train] {sym} error: {e}")
-            logger.info(f"  🛡️ Worst Case models trained: {wc_trained}/{len(trainable)}")
 
     def _promote_and_jit_train(self, symbol: str, catalyst_type: str) -> bool:
         """
@@ -1051,32 +894,12 @@ class TradingPipeline:
 # RUNNERS
 # ============================================================
 
-def _get_scan_symbols(pipeline) -> list:
-    """ดึง symbols ที่ TechnicalScanner ควรสแกน"""
-    if pipeline._tiers:
-        if pipeline.tech_scanner and pipeline.tech_scanner.config.scan_tier1_only:
-            return pipeline._tiers.tier1_hot
-        return pipeline._tiers.tier1_hot + pipeline._tiers.tier2_warm
-    return list(pipeline.cfg.ML_WATCHLIST)
-
-
 def run_live(args):
     Config.load_profile(args.profile)
     Config.validate(args.mode)
 
     pipeline = TradingPipeline(mode=args.mode, dry_run=args.dry_run)
     pipeline.register_shutdown()
-
-    # ── Technical Scanner (if enabled)
-    if getattr(args, 'enable_tech_scan', False):
-        try:
-            from technical_scanner import TechnicalScanner, TechScanConfig
-            tech_cfg = TechScanConfig.from_env()
-            tech_cfg.enabled = True
-            pipeline.tech_scanner = TechnicalScanner(config=tech_cfg)
-            logger.info(f"🔬 TechnicalScanner ENABLED | rules={sorted(tech_cfg.active_rules)}")
-        except ImportError:
-            logger.warning("⚠️ technical_scanner.py not found → TechScan disabled")
 
     threading.Thread(target=pipeline._time_kill_watcher,
                      name="time-kill", daemon=True).start()
@@ -1111,22 +934,6 @@ def run_live(args):
             t = now_et()
             if t.minute % 15 == 0:
                 logger.debug(f"⏰ 15m tick: {t.strftime('%H:%M')} ET")
-
-                # ── Technical Scanner: scan ทุก 15m candle close
-                if pipeline.tech_scanner and pipeline.tech_scanner.config.enabled:
-                    try:
-                        scan_symbols = _get_scan_symbols(pipeline)
-                        tech_candidates = pipeline.tech_scanner.scan_tick(
-                            scan_symbols, pipeline,
-                        )
-                        for tc in tech_candidates:
-                            try:
-                                pipeline.process_news(tc)
-                            except Exception as e:
-                                logger.error(f"Tech signal pipeline error: {e}")
-                    except Exception as e:
-                        logger.error(f"TechScan tick error: {e}", exc_info=True)
-
             # Sleep until next 15m boundary
             secs_to_next = max(1, (15 - t.minute % 15) * 60 - t.second)
             pipeline._stop.wait(min(secs_to_next, 60))
@@ -1138,207 +945,30 @@ def run_live(args):
         pipeline.journal.print_performance_report()
         stats = pipeline.gate19.get_stats()
         logger.info(f"Gate 19 stats: {stats}")
-        if pipeline.wc_gate:
-            wc_stats = pipeline.wc_gate.get_stats()
-            logger.info(f"Gate WC stats: {wc_stats}")
-        if pipeline.tech_scanner:
-            logger.info(f"TechScan stats: {pipeline.tech_scanner.get_stats()}")
-
-
-def _load_watchlist_from_universe() -> list[str]:
-    """โหลด watchlist จาก universe.json (ไฟล์เดียวกับที่ใช้ train LSTM)"""
-    import json
-    candidates = [
-        Path("./universe.json"),
-        Path("./gdrive/universe.json"),
-        Path(Config.MODEL_DIR) / ".." / "universe.json",
-    ]
-    for p in candidates:
-        try:
-            p = p.resolve()
-            if p.exists():
-                with open(p) as f:
-                    data = json.load(f)
-                symbols = data.get("symbols", [])
-                tag     = data.get("tag", "?")
-                stats   = data.get("stats", {})
-                logger.info(f"📋 Loaded universe: {len(symbols)} symbols (tag={tag}, file={p.name})")
-                logger.info(f"   Stats: {stats}")
-                return symbols
-        except Exception as e:
-            logger.warning(f"load_universe {p}: {e}")
-    logger.warning("ไม่พบ universe.json → ใช้ default watchlist")
-    return ["NVDA", "TSLA", "META", "AAPL", "AMZN"]
-
-
-def _fetch_edgar_historical(watchlist: list[str], lookback_days: int = 2) -> list:
-    """
-    ดึง SEC EDGAR filings ย้อนหลังจาก data.sec.gov สำหรับทุก symbol ใน watchlist
-    SEC rate limit: 10 req/sec → sleep 0.12s ระหว่าง request
-    """
-    import requests as _req
-
-    headers = {"User-Agent": "TTPDryRun research@example.com", "Accept": "application/json"}
-    classifier = CatalystClassifier()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
-
-    # ── Step 1: Ticker → CIK mapping
-    logger.info(f"[EDGAR] ดึง ticker→CIK mapping...")
-    try:
-        resp = _req.get("https://www.sec.gov/files/company_tickers.json",
-                        headers=headers, timeout=15)
-        resp.raise_for_status()
-        ticker_cik = {}
-        for item in resp.json().values():
-            ticker_cik[item["ticker"]] = str(item["cik_str"]).zfill(10)
-    except Exception as e:
-        logger.error(f"[EDGAR] ดึง CIK mapping ไม่ได้: {e}")
-        return []
-
-    mapped = {sym: ticker_cik[sym] for sym in watchlist if sym in ticker_cik}
-    logger.info(f"[EDGAR] CIK mapped: {len(mapped)}/{len(watchlist)} symbols")
-
-    # ── Step 2: Query filings per symbol
-    FORMS_INTEREST = {"8-K", "8-K/A", "SC TO-T", "SC TO-T/A"}
-    candidates = []
-
-    for sym, cik in mapped.items():
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        try:
-            r = _req.get(url, headers=headers, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            recent = data.get("filings", {}).get("recent", {})
-            forms  = recent.get("form", [])
-            dates  = recent.get("filingDate", [])
-            descs  = recent.get("primaryDocDescription", [])
-            company_name = data.get("name", sym)
-
-            for form, dt_str, desc in zip(forms, dates, descs):
-                if form not in FORMS_INTEREST:
-                    continue
-                try:
-                    filed = datetime.strptime(dt_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-                if filed < cutoff:
-                    continue
-
-                full_text = f"{company_name} {sym} {form} {desc or ''}"
-                if form.startswith("SC TO"):
-                    catalyst_type, urgency = "MA", 90
-                else:
-                    result = classifier.classify(full_text)
-                    catalyst_type, urgency = result if result else ("EARNINGS", 75)
-
-                headline = f"[SEC {form}] {company_name} ({sym}) — {desc or form}"
-                candidates.append(NewsCandidate(
-                    symbol=sym, headline=headline[:200],
-                    catalyst_type=catalyst_type, urgency_score=urgency,
-                    source="SEC_EDGAR",
-                    url=f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form}",
-                    timestamp=filed,
-                ))
-        except Exception as e:
-            logger.debug(f"[EDGAR] {sym} fetch error: {e}")
-        time.sleep(0.12)
-
-    candidates.sort(key=lambda c: c.timestamp, reverse=True)
-    logger.info(f"[EDGAR] Historical filings: {len(candidates)} matched from {lookback_days} days")
-    for c in candidates:
-        logger.info(f"  {c.symbol:6s} | {c.catalyst_type:15s} | {c.timestamp.strftime('%Y-%m-%d')} | {c.headline[:80]}")
-    return candidates
 
 
 def run_dry_run(args):
-    # ── Dry-run ใช้ Alpaca Paper เป็น default
-    dry_profile = args.profile
-    alpaca_profiles = {"ALPACA_PAPER_100K", "ALPACA_PAPER_25K"}
-    if dry_profile not in alpaca_profiles:
-        dry_profile = "ALPACA_PAPER_100K"
-        logger.info(f"[DRY] Override profile → {dry_profile} (Alpaca Paper)")
-
-    Config.load_profile(dry_profile)
-    logger.info("🧪 DRY-RUN MODE (Alpaca Paper + SEC EDGAR news)")
+    Config.load_profile(args.profile)
+    logger.info("🧪 DRY-RUN MODE")
 
     pipeline = TradingPipeline(mode="paper", dry_run=True)
-    pipeline.register_shutdown()
 
-    watchlist = _load_watchlist_from_universe()
-
-    # ══════════════════════════════════════════════════════════
-    # Phase 1: Quick smoke-test (mock news 3 ตัว)
-    # ══════════════════════════════════════════════════════════
-    logger.info("── Phase 1: Quick smoke-test (3 mock news) ──")
     mock_news = [
         NewsCandidate("NVDA", "NVIDIA beats Q2 EPS by 15%",
-                       "EARNINGS", 90, "DRY_RUN"),
+                       "EARNINGS", 90, "SEC_EDGAR"),
         NewsCandidate("TSLA", "Tesla lowers guidance",
-                       "GUIDANCE_DOWN", 70, "DRY_RUN"),
+                       "GUIDANCE_DOWN", 70, "BENZINGA"),
         NewsCandidate("META", "Goldman upgrades META",
-                       "ANALYST_UP", 70, "DRY_RUN"),
+                       "ANALYST_UP", 70, "BENZINGA"),
     ]
+
     for news in mock_news:
         pipeline.process_news(news)
-        time.sleep(0.1)
-    logger.info("── Phase 1 done ──")
+        time.sleep(0.2)
 
-    # ══════════════════════════════════════════════════════════
-    # Phase 2: Real SEC EDGAR filings ย้อนหลัง 1-2 วัน
-    # ══════════════════════════════════════════════════════════
-    logger.info("── Phase 2: Real SEC EDGAR historical filings ──")
-    real_filings = _fetch_edgar_historical(watchlist, lookback_days=2)
-    if not real_filings:
-        logger.info("[EDGAR] ไม่พบ filings 2 วัน → ขยาย 7 วัน")
-        real_filings = _fetch_edgar_historical(watchlist, lookback_days=7)
-
-    if real_filings:
-        logger.info(f"── Processing {len(real_filings)} real SEC filings through pipeline ──")
-        for news in real_filings:
-            pipeline.process_news(news)
-            time.sleep(0.2)
-        logger.info(f"── Phase 2 done: {len(real_filings)} real filings processed ──")
-    else:
-        logger.warning("── Phase 2: ไม่พบ filings สำหรับ watchlist ──")
-
-    # ══════════════════════════════════════════════════════════
-    # Phase 3: Live SEC EDGAR feed (รอข่าวใหม่)
-    # ══════════════════════════════════════════════════════════
-    logger.info("── Phase 3: Live news scanner — SEC EDGAR only (dry-run) ──")
-
-    def on_news(c: NewsCandidate):
-        if c.symbol not in watchlist:
-            return
-        try:
-            pipeline.process_news(c)
-        except Exception as e:
-            logger.error(f"Pipeline error: {e}", exc_info=True)
-
-    scanner = NewsScanner(
-        benzinga_api_key=None, use_sec_edgar=True,
-        min_urgency=Config.MIN_URGENCY, callback=on_news,
-    )
-    scanner.start()
-
-    logger.info(f"🟡 DRY-RUN LIVE — SEC EDGAR feed | {Config.summary()}")
-    logger.info(f"   Watching {len(watchlist)} symbols | Ctrl+C to stop")
-
-    try:
-        while not pipeline._stop.is_set():
-            t = now_et()
-            if t.minute % 15 == 0:
-                logger.debug(f"⏰ 15m tick: {t.strftime('%H:%M')} ET")
-            secs_to_next = max(1, (15 - t.minute % 15) * 60 - t.second)
-            pipeline._stop.wait(min(secs_to_next, 60))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        scanner.stop()
-        pipeline.journal.print_performance_report()
-        stats = pipeline.gate19.get_stats()
-        logger.info(f"Gate 19 stats: {stats}")
-        if pipeline.wc_gate:
-            logger.info(f"Gate WC stats: {pipeline.wc_gate.get_stats()}")
+    pipeline.journal.print_performance_report()
+    stats = pipeline.gate19.get_stats()
+    logger.info(f"Gate 19 stats: {stats}")
 
 
 def run_report(args):
@@ -1347,54 +977,20 @@ def run_report(args):
     journal.print_performance_report()
 
 
-def run_shadow(args):
-    """
-    Shadow Mode — Full pipeline observation without order execution.
-
-    Two sub-modes:
-      1. One-shot (default): สแกนครั้งเดียว แสดงผลทุก gate แล้วจบ
-      2. Live shadow (--live-shadow): วิ่งคู่ตลาดจริง รอข่าว แสดงผล ไม่สั่ง order
-    """
+def run_test_proxy(args):
+    """รัน FTMO proxy test script"""
     Config.load_profile(args.profile)
-
-    # ── Parse skip-gates
-    skip_gates = set()
-    if args.skip_gates:
-        skip_gates = set(g.strip().lower() for g in args.skip_gates.split(",") if g.strip())
-
-    # ── Parse shadow-symbols
-    shadow_symbols = None
-    if args.shadow_symbols:
-        shadow_symbols = [s.strip().upper() for s in args.shadow_symbols.split(",") if s.strip()]
-
-    # ── Parse watchlist file
-    watchlist_file = args.shadow_watchlist if args.shadow_watchlist else None
-
-    # ── Create pipeline (always dry_run=True for safety)
-    pipeline = TradingPipeline(mode="paper", dry_run=True)
-
-    # ── Technical Scanner (if enabled)
-    if getattr(args, 'enable_tech_scan', False):
-        try:
-            from technical_scanner import TechnicalScanner, TechScanConfig
-            tech_cfg = TechScanConfig.from_env()
-            tech_cfg.enabled = True
-            pipeline.tech_scanner = TechnicalScanner(config=tech_cfg)
-            logger.info(f"🔬 TechnicalScanner ENABLED in Shadow | rules={sorted(tech_cfg.active_rules)}")
-        except ImportError:
-            logger.warning("⚠️ technical_scanner.py not found → TechScan disabled")
-
-    # ── Run
-    from shadow_runner import run_shadow_oneshot, run_shadow_live
-
-    if args.live_shadow:
-        run_shadow_live(pipeline, skip_gates=skip_gates,
-                        shadow_symbols=shadow_symbols,
-                        watchlist_file=watchlist_file)
-    else:
-        run_shadow_oneshot(pipeline, skip_gates=skip_gates,
-                           shadow_symbols=shadow_symbols,
-                           watchlist_file=watchlist_file)
+    try:
+        from test_ftmo_proxy import run_tests
+        run_tests(
+            max_level=args.test_proxy_level,
+            symbol=args.test_proxy_symbol,
+        )
+    except ImportError:
+        logger.error(
+            "test_ftmo_proxy.py not found!\n"
+            "   Copy it to the same directory as main.py"
+        )
 
 
 # ============================================================
@@ -1409,43 +1005,23 @@ def main():
         description="Universal 15m Quant Engine + LLM CIO (Gate 19)")
     parser.add_argument("--profile", choices=profiles, default="TTP_5K_FLEX",
                         help=f"Prop firm profile: {profiles}")
-    parser.add_argument("--mode", choices=["paper", "live", "shadow"], default="paper",
-                        help="paper=mock exec, live=real orders, shadow=observe only")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Quick test with mock + SEC EDGAR data")
-    parser.add_argument("--report", action="store_true",
-                        help="Print journal report and exit")
-
-    # ── Shadow mode options
-    shadow_group = parser.add_argument_group("shadow mode options")
-    shadow_group.add_argument("--live-shadow", action="store_true",
-                              help="Run shadow mode continuously (like live, but no orders)")
-    shadow_group.add_argument("--skip-gates", type=str, default="",
-                              help="Comma-separated gate IDs to skip. "
-                                   "Available: daily_loss,session,sentiment,price,"
-                                   "universe,regime,ml,max_orders,rate_limit,"
-                                   "wash_sale,no_hedge,streak,risk,gate19")
-    shadow_group.add_argument("--shadow-symbols", type=str, default="",
-                              help="Comma-separated symbols to analyze (default: watchlist)")
-    shadow_group.add_argument("--shadow-watchlist", type=str, default="",
-                              help="Path to watchlist file (.json/.csv/.txt). "
-                                   "Supports: universe.json, JSON array, CSV with "
-                                   "symbol/ticker column, or text (1 per line)")
-
-    # ── Technical Scanner
-    tech_group = parser.add_argument_group("technical scanner")
-    tech_group.add_argument("--enable-tech-scan", action="store_true",
-                            help="Enable 15m technical scanning (VWAP pullback, "
-                                 "ML breakout, volume spike). Works in all modes.")
-
+    parser.add_argument("--mode", choices=["paper", "live"], default="paper")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--report", action="store_true")
+    parser.add_argument("--test-proxy", action="store_true",
+                        help="Run FTMO proxy connectivity & order test")
+    parser.add_argument("--test-proxy-level", type=int, default=2, choices=[0,1,2,3,4],
+                        help="Max test level for --test-proxy (default: 2)")
+    parser.add_argument("--test-proxy-symbol", type=str, default="EURUSD",
+                        help="Symbol for --test-proxy Level 3 (default: EURUSD)")
     args = parser.parse_args()
 
     if args.report:
         run_report(args)
+    elif args.test_proxy:
+        run_test_proxy(args)
     elif args.dry_run:
         run_dry_run(args)
-    elif args.mode == "shadow":
-        run_shadow(args)
     else:
         if args.mode == "live":
             confirm = input("\n⚠️ LIVE MODE! Type 'CONFIRM': ").strip()

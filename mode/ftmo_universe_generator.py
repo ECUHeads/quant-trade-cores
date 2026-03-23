@@ -284,10 +284,17 @@ class FtmoUniverseGenerator:
           US100.cash → NAS100  (index — rename)
           USOIL.cash → USOIL   (commodity — ลบ .cash)
         """
-        # Reverse lookup from SYMBOL_MAP first
-        reverse = {v: k for k, v in SYMBOL_MAP.items()}
-        if mt5_name in reverse:
-            return reverse[mt5_name]
+        # Reverse lookup from Config.SYMBOL_MAP (ถ้า load profile แล้ว)
+        try:
+            from config import Config
+            symbol_map = getattr(Config, "SYMBOL_MAP", {}) or {}
+        except ImportError:
+            symbol_map = {}
+
+        if symbol_map:
+            reverse = {v: k for k, v in symbol_map.items()}
+            if mt5_name in reverse:
+                return reverse[mt5_name]
 
         # Generic: strip common suffixes
         clean = mt5_name
