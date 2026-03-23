@@ -301,7 +301,7 @@ class TradeJournal:
         rec.pnl_pct    = round(rec.pnl_usd / (rec.actual_entry * rec.shares) * 100, 4) if rec.actual_entry else 0
         rec.is_winner  = rec.pnl_usd > 0
 
-        # ── คำนวณ Total Cost (all-in) & Net P&L
+        # ── คำนวณ Total Cost (all-in) & Net P&L (Enhancement)
         rec.total_cost_usd = round(
             commission_usd
             + abs(rec.spread_cost_usd)
@@ -358,13 +358,6 @@ class TradeJournal:
         """
         คำนวณ stats ครบชุดจาก trades.csv
         คืน dict พร้อม save ลง performance.json
-
-        Enhancement: เพิ่ม cost-adjusted metrics ตามแนวทางบทความ CFD
-          - Net P&L (หักค่าใช้จ่ายทั้งหมดแล้ว)
-          - Cost drag % (ค่าใช้จ่ายกิน profit ไปกี่ %)
-          - Fill quality (slippage, requote, latency)
-          - Order type breakdown (MARKET vs LIMIT performance)
-          - Gross vs Net drawdown comparison
         """
         rows = self.load_all_trades()
         closed = [r for r in rows if r.get("exit_time")]
@@ -393,6 +386,34 @@ class TradeJournal:
 
         rr_values = [_f(r["rr_achieved"]) for r in closed]
         avg_rr    = round(sum(rr_values) / total, 2)
+
+        # ── Breakdown by Catalyst
+        catalyst_stats: dict[str, dict] = {}
+        for r in closed:
+            cat = r.get("catalyst_type", "UNKNOWN")
+            if cat not in catalyst_stats:
+                catalyst_stats[cat] = {"total": 0, "wins": 0, "pnl": 0.0}
+            catalyst_stats[cat]["total"] += 1
+            catalyst_stats[cat]["wins"]  += 1 if _b(r["is_winner"]) else 0
+            catalyst_stats[cat]["pnl"]   += _f(r["pnl_usd"])
+
+        for cat, s in catalyst_stats.items():
+            s["win_rate"] = round(s["wins"] / s["total"] * 100, 1)
+            s["pnl"]      = round(s["pnl"], 2)
+
+        # ── Breakdown by Session
+        session_stats: dict[str, dict] = {}
+        for r in closed:
+            sess = r.get("market_session", "UNKNOWN")
+            if sess not in session_stats:
+                session_stats[sess] = {"total": 0, "wins": 0, "pnl": 0.0}
+            session_stats[sess]["total"] += 1
+            session_stats[sess]["wins"]  += 1 if _b(r["is_winner"]) else 0
+            session_stats[sess]["pnl"]   += _f(r["pnl_usd"])
+
+        for sess, s in session_stats.items():
+            s["win_rate"] = round(s["wins"] / s["total"] * 100, 1)
+            s["pnl"]      = round(s["pnl"], 2)
 
         # ══════════════════════════════════════════════════════
         # COST-ADJUSTED METRICS (Enhancement — จากบทความ CFD)
@@ -456,34 +477,6 @@ class TradeJournal:
             s["pnl"]          = round(s["pnl"], 2)
             s["net_pnl"]      = round(s["net_pnl"], 2)
             s["avg_slippage"] = round(s["slippage"] / s["total"], 4) if s["total"] > 0 else 0
-
-        # ── Breakdown by Catalyst
-        catalyst_stats: dict[str, dict] = {}
-        for r in closed:
-            cat = r.get("catalyst_type", "UNKNOWN")
-            if cat not in catalyst_stats:
-                catalyst_stats[cat] = {"total": 0, "wins": 0, "pnl": 0.0}
-            catalyst_stats[cat]["total"] += 1
-            catalyst_stats[cat]["wins"]  += 1 if _b(r["is_winner"]) else 0
-            catalyst_stats[cat]["pnl"]   += _f(r["pnl_usd"])
-
-        for cat, s in catalyst_stats.items():
-            s["win_rate"] = round(s["wins"] / s["total"] * 100, 1)
-            s["pnl"]      = round(s["pnl"], 2)
-
-        # ── Breakdown by Session
-        session_stats: dict[str, dict] = {}
-        for r in closed:
-            sess = r.get("market_session", "UNKNOWN")
-            if sess not in session_stats:
-                session_stats[sess] = {"total": 0, "wins": 0, "pnl": 0.0}
-            session_stats[sess]["total"] += 1
-            session_stats[sess]["wins"]  += 1 if _b(r["is_winner"]) else 0
-            session_stats[sess]["pnl"]   += _f(r["pnl_usd"])
-
-        for sess, s in session_stats.items():
-            s["win_rate"] = round(s["wins"] / s["total"] * 100, 1)
-            s["pnl"]      = round(s["pnl"], 2)
 
         # ── Drawdown: GROSS vs NET (Enhancement — dual equity curve)
         equity_gross = 0.0; peak_gross = 0.0; max_dd_gross = 0.0
@@ -753,7 +746,6 @@ class TradeJournal:
             print(f"  Slippage   : ${cb.get('slippage', 0):>10.2f}")
             print(f"  Overnight  : ${cb.get('overnight', 0):>10.2f}")
             print(f"  Avg/trade  : ${stats.get('avg_cost_per_trade', 0):>10.2f}")
-            # Visual cost drag bar
             drag_bar = "█" * min(20, int(drag / 5))
             print(f"  Cost Drag  :  {drag_bar} {drag:.1f}%")
 

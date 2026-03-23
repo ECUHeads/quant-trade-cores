@@ -68,6 +68,11 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              1_000_000,
         "contract_multiplier":  1,                 # stocks = 1
         "tick_size":            0.01,
+        # ── Cost Tracking (Enhancement)
+        "typical_spread_pips":  0.0,               # equities: use spread_buffer_pct instead
+        "overnight_swap_long":  0.0,               # no cost for long (prop firm)
+        "overnight_swap_short": -5.0,              # borrow fee for short ~5% annualized
+        "max_spread_multiplier": 3.0,
     },
 
     # ── Trade The Pool — $80K Super Pool
@@ -101,6 +106,11 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              1_000_000,
         "contract_multiplier":  1,
         "tick_size":            0.01,
+        # ── Cost Tracking (Enhancement)
+        "typical_spread_pips":  0.0,
+        "overnight_swap_long":  0.0,
+        "overnight_swap_short": -5.0,
+        "max_spread_multiplier": 3.0,
     },
 
     # ── FTMO — $100K Challenge (Forex/CFD)
@@ -108,7 +118,7 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "firm_name":            "FTMO",
         "account_label":        "$100K Challenge",
         "asset_class":          "CFD",
-        "execution_method":     "MT5_PROXY",       # Linux → Windows Proxy → MT5 → FTMO
+        "execution_method":     "MT5",             # MetaTrader 5
         "allow_fractional":     True,              # CFD lots can be 0.01
         "account_size_usd":     100_000.0,
         "max_buying_power":     100_000.0,
@@ -134,26 +144,11 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              0,
         "contract_multiplier":  100_000,           # 1 lot forex = 100K units
         "tick_size":            0.00001,            # 5 decimal forex
-
-        # ── MT5 Proxy Settings (Linux → Windows VPS bridge)
-        "mt5_proxy_url":         os.getenv("MT5_PROXY_URL", ""),
-        "mt5_proxy_api_key":     os.getenv("MT5_PROXY_API_KEY", ""),
-        "mt5_proxy_hmac_secret": os.getenv("MT5_PROXY_HMAC_SECRET", ""),
-
-        # ── FTMO Symbol Mapping: canonical engine name → MT5 broker name
-        "symbol_map": {
-            "EURUSD": "EURUSD",   "GBPUSD": "GBPUSD",   "USDJPY": "USDJPY",
-            "AUDUSD": "AUDUSD",   "USDCAD": "USDCAD",   "USDCHF": "USDCHF",
-            "NZDUSD": "NZDUSD",   "EURGBP": "EURGBP",   "EURJPY": "EURJPY",
-            "GBPJPY": "GBPJPY",   "EURCAD": "EURCAD",   "AUDCAD": "AUDCAD",
-            "US30":   "US30.cash",  "NAS100": "US100.cash",
-            "SPX500": "US500.cash", "GER40":  "GER40.cash",
-            "UK100":  "UK100.cash", "JPN225": "JP225.cash",
-            "XAUUSD": "XAUUSD",    "XAGUSD": "XAGUSD",
-            "USOIL":  "USOIL.cash", "UKOIL": "UKOIL.cash",
-            "BTCUSD": "BTCUSD",    "ETHUSD": "ETHUSD",
-            "LTCUSD": "LTCUSD",    "XRPUSD": "XRPUSD",
-        },
+        # ── Cost Tracking (Enhancement)
+        "typical_spread_pips":  1.5,               # avg spread in pips for backtest
+        "overnight_swap_long":  -3.5,              # annual % paid on long overnight
+        "overnight_swap_short": 1.0,               # annual % earned on short overnight
+        "max_spread_multiplier": 3.0,              # delay entry if spread > 3× avg
     },
 
     # ── Topstep — $50K Futures (NQ)
@@ -187,6 +182,12 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              0,
         "contract_multiplier":  20,                # NQ micro = $20/point
         "tick_size":            0.25,              # NQ tick = 0.25 pts
+        # ── Cost Tracking (Enhancement)
+        "typical_spread_pips":  0.0,               # futures: use tick_size-based spread
+        "overnight_swap_long":  0.0,               # futures: no overnight swap
+        "overnight_swap_short": 0.0,
+        "max_spread_multiplier": 3.0,
+        "rollover_cost_per_contract": 2.50,        # NQ rollover cost at expiry
     },
 
     # ══════════════════════════════════════════════════════
@@ -241,6 +242,11 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              500_000,            # ลด ADV ลง (ทดสอบ)
         "contract_multiplier":  1,
         "tick_size":            0.01,
+        # ── Cost Tracking (Enhancement)
+        "typical_spread_pips":  0.0,
+        "overnight_swap_long":  0.0,               # Alpaca: no margin interest (paper)
+        "overnight_swap_short": -5.0,              # borrow fee for shorts
+        "max_spread_multiplier": 3.0,
     },
 
     # ── Alpaca Paper — $25K (PDT-safe)
@@ -274,6 +280,11 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              1_000_000,
         "contract_multiplier":  1,
         "tick_size":            0.01,
+        # ── Cost Tracking (Enhancement)
+        "typical_spread_pips":  0.0,
+        "overnight_swap_long":  0.0,
+        "overnight_swap_short": -5.0,
+        "max_spread_multiplier": 3.0,
     },
 }
 
@@ -420,19 +431,10 @@ def validate_profile(profile: dict) -> list[str]:
         )
 
     # Rule 6: execution_method
-    valid_methods = {"MT5", "MT5_PROXY", "API_REST", "JSON_DUMP"}
+    valid_methods = {"MT5", "API_REST", "JSON_DUMP"}
     em = profile.get("execution_method", "JSON_DUMP")
     if em not in valid_methods:
         errors.append(f"execution_method '{em}' not in {valid_methods}")
-
-    # Rule 10: MT5_PROXY ต้องมี proxy_url (warning, ไม่ block)
-    if em == "MT5_PROXY":
-        proxy_url = profile.get("mt5_proxy_url", "")
-        if not proxy_url:
-            errors.append(
-                "WARNING: execution_method=MT5_PROXY but mt5_proxy_url is empty. "
-                "Set env MT5_PROXY_URL or provide in profile."
-            )
 
     # Rule 7: asset_class
     if ac not in ASSET_CLASS_CONFIG:
@@ -567,11 +569,12 @@ class Config:
     CONTRACT_MULTIPLIER  = 1
     TICK_SIZE            = 0.01
 
-    # ── MT5 Proxy (FTMO bridge — Linux → Windows VPS → MT5)
-    MT5_PROXY_URL         = os.getenv("MT5_PROXY_URL", "")
-    MT5_PROXY_API_KEY     = os.getenv("MT5_PROXY_API_KEY", "")
-    MT5_PROXY_HMAC_SECRET = os.getenv("MT5_PROXY_HMAC_SECRET", "")
-    SYMBOL_MAP            = {}
+    # ── Cost Tracking (Enhancement)
+    TYPICAL_SPREAD_PIPS      = 0.0        # avg spread in pips (CFD backtest)
+    OVERNIGHT_SWAP_LONG      = 0.0        # annual % for long overnight
+    OVERNIGHT_SWAP_SHORT     = 0.0        # annual % for short overnight
+    MAX_SPREAD_MULTIPLIER    = 3.0        # delay entry if spread > N× avg
+    ROLLOVER_COST_PER_CONTRACT = 0.0      # futures rollover cost
 
     # ── Profile metadata
     _active_profile_name = None
@@ -665,10 +668,12 @@ class Config:
             "min_adv":              "MIN_ADV",
             "contract_multiplier":  "CONTRACT_MULTIPLIER",
             "tick_size":            "TICK_SIZE",
-            # ── MT5 Proxy fields
-            "mt5_proxy_url":        "MT5_PROXY_URL",
-            "mt5_proxy_api_key":    "MT5_PROXY_API_KEY",
-            "mt5_proxy_hmac_secret": "MT5_PROXY_HMAC_SECRET",
+            # ── Cost Tracking (Enhancement)
+            "typical_spread_pips":      "TYPICAL_SPREAD_PIPS",
+            "overnight_swap_long":      "OVERNIGHT_SWAP_LONG",
+            "overnight_swap_short":     "OVERNIGHT_SWAP_SHORT",
+            "max_spread_multiplier":    "MAX_SPREAD_MULTIPLIER",
+            "rollover_cost_per_contract": "ROLLOVER_COST_PER_CONTRACT",
         }
 
         for profile_key, attr_name in MAPPING.items():
@@ -680,16 +685,6 @@ class Config:
             cls.FLATTEN_TIME_ET = tuple(profile["flatten_time_et"])
         if "no_new_entry_after" in profile:
             cls.NO_NEW_ENTRY_AFTER = tuple(profile["no_new_entry_after"])
-
-        # ── Special: symbol_map (dict, not scalar)
-        if "symbol_map" in profile:
-            cls.SYMBOL_MAP = profile["symbol_map"]
-
-        # ── Special: MT5 Proxy — re-read from env at runtime
-        if cls.EXECUTION_METHOD == "MT5_PROXY":
-            cls.MT5_PROXY_URL         = os.getenv("MT5_PROXY_URL", "")         or cls.MT5_PROXY_URL
-            cls.MT5_PROXY_API_KEY     = os.getenv("MT5_PROXY_API_KEY", "")     or cls.MT5_PROXY_API_KEY
-            cls.MT5_PROXY_HMAC_SECRET = os.getenv("MT5_PROXY_HMAC_SECRET", "") or cls.MT5_PROXY_HMAC_SECRET
 
         cls._active_profile_name = name
         cls._active_profile_raw  = profile
@@ -730,15 +725,6 @@ class Config:
             key    = cls.ALPACA_PAPER_KEY    or cls.ALPACA_LIVE_KEY
             secret = cls.ALPACA_PAPER_SECRET or cls.ALPACA_LIVE_SECRET
         return key, secret
-
-    @classmethod
-    def get_mt5_proxy_config(cls) -> dict:
-        """คืน MT5 Proxy config สำหรับ Mt5ProxyAdapter"""
-        return {
-            "mt5_proxy_url":        cls.MT5_PROXY_URL,
-            "mt5_proxy_api_key":    cls.MT5_PROXY_API_KEY,
-            "mt5_proxy_hmac_secret": cls.MT5_PROXY_HMAC_SECRET,
-        }
 
     # ══════════════════════════════════════════════════════════
     # VALIDATION
@@ -788,24 +774,6 @@ class Config:
                     f"[Config] Gate 19 LLM enabled but no API keys found "
                     f"({cls.LLM_PRIMARY} / {cls.LLM_FALLBACK}). "
                     f"Gate 19 will {cls.LLM_FAIL_ACTION} all trades."
-                )
-
-        # ── ตรวจ MT5 Proxy keys (สำหรับ FTMO)
-        if cls.EXECUTION_METHOD == "MT5_PROXY":
-            if not cls.MT5_PROXY_URL:
-                logger.warning(
-                    "[Config] execution_method=MT5_PROXY but MT5_PROXY_URL is empty.\n"
-                    "   Set: export MT5_PROXY_URL='https://your-windows-vps:8500'"
-                )
-            if not cls.MT5_PROXY_API_KEY:
-                logger.warning(
-                    "[Config] MT5_PROXY_API_KEY not set.\n"
-                    "   Set: export MT5_PROXY_API_KEY='your-secure-key'"
-                )
-            if mode == "live" and not cls.MT5_PROXY_URL:
-                raise EnvironmentError(
-                    "Cannot run LIVE with MT5_PROXY without MT5_PROXY_URL!\n"
-                    "Set: export MT5_PROXY_URL='https://your-windows-vps:8500'"
                 )
 
         # ── สร้าง directories
