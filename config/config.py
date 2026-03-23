@@ -478,8 +478,8 @@ class Config:
     CANDLE_INTERVAL_SEC = 15 * 60       # 900s
 
     # ── API Keys (จาก env)
-    ALPACA_PAPER_KEY    = os.getenv("ALPACA_PAPER_KEY",    "PK7R76OP7UX26IEAYYPT7GN26P")
-    ALPACA_PAPER_SECRET = os.getenv("ALPACA_PAPER_SECRET", "3QnTihzCfuBYqA99pfX3XUUZhuv7fEDvvXpXhBcr4p8N")
+    ALPACA_PAPER_KEY    = os.getenv("ALPACA_PAPER_KEY",    "")
+    ALPACA_PAPER_SECRET = os.getenv("ALPACA_PAPER_SECRET", "")
     ALPACA_LIVE_KEY     = os.getenv("ALPACA_LIVE_KEY",     "")
     ALPACA_LIVE_SECRET  = os.getenv("ALPACA_LIVE_SECRET",  "")
     ALPACA_FEED         = os.getenv("ALPACA_FEED", "iex")   # "iex" (free) | "sip" (paid)
