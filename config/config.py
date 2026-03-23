@@ -360,9 +360,9 @@ LLM_PROVIDERS = {
         "base_url":     os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434"),
         "model":        os.getenv("LOCAL_LLM_MODEL",    "qwen2.5:14b-instruct-q5_K_M"),
         "backend":      os.getenv("LOCAL_LLM_BACKEND",  "OLLAMA"),   # OLLAMA | OPENAI_COMPAT
-        "max_tokens":   1024,
+        "max_tokens":   2048,          # bilingual response ใช้ tokens มากขึ้น
         "temperature":  0.1,
-        "timeout_sec":  30,        # local model อาจช้ากว่า cloud API
+        "timeout_sec":  int(os.getenv("LOCAL_LLM_TIMEOUT", "90")),  # R1 <think> ใช้เวลานาน
         "headers_fn":   lambda key: {
             "Content-Type": "application/json",
             **({"Authorization": f"Bearer {key}"} if key else {}),

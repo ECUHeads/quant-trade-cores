@@ -17,11 +17,29 @@ Session Control:
 Timezone:
   ใช้ ZoneInfo("America/New_York") — DST-aware
 
+Modes:
+  paper   — ข้อมูลจริง, ไม่สั่ง order จริง (MockExecutor)
+  live    — ข้อมูลจริง, สั่ง order จริง (ต้อง confirm)
+  shadow  — ข้อมูลจริง, รันทุก gate แบบ non-blocking, ไม่สั่ง order
+             บันทึกผลทุก gate → console + JSON report
+
 Usage:
   python main.py --profile TTP_5K_FLEX --mode paper
   python main.py --profile FTMO_100K --mode live
   python main.py --profile TTP_5K_FLEX --dry-run
   python main.py --report
+
+  # Shadow mode
+  python main.py --mode shadow                                     # one-shot
+  python main.py --mode shadow --live-shadow                       # live continuous
+  python main.py --mode shadow --skip-gates gate19,session         # skip gates
+  python main.py --mode shadow --shadow-symbols NVDA,TSLA,META     # specific symbols
+  python main.py --mode shadow --shadow-watchlist ./universe.json  # from file
+
+  # Technical Scanner (dual-trigger: news + indicator)
+  python main.py --mode paper --enable-tech-scan
+  python main.py --mode live --enable-tech-scan
+  python main.py --mode shadow --enable-tech-scan --skip-gates gate19
 """
 
 import os
@@ -352,6 +370,9 @@ class TradingPipeline:
         else:
             self.wc_gate = None
 
+        # 10. Technical Scanner (disabled by default, --enable-tech-scan)
+        self.tech_scanner = None  # set by run_live/run_shadow if enabled
+
         logger.info("✅ All modules loaded")
 
     # ------------------------------------------
@@ -557,12 +578,18 @@ class TradingPipeline:
             )
             logger.info(f"  [DRY] bypass Gate 19 → mock verdict=EXECUTE")
         else:
+            intraday = self._fetch_intraday_context(sym)
             verdict = self.gate19.evaluate_trade(
                 market_data={
                     "symbol": sym, "price": price,
-                    "vwap": 0, "atr_15m": atr, "vix": sentiment.get("vix", 20),
+                    "prev_close": intraday["prev_close"],
+                    "vwap": intraday["vwap"],
+                    "day_high": intraday["day_high"],
+                    "day_low": intraday["day_low"],
+                    "atr_15m": atr, "vix": sentiment.get("vix", 20),
                     "spy_trend": "up" if sentiment["sentiment_score"] > 0.5 else "down",
                     "session": session,
+                    "timeframe": self.cfg.TIMEFRAME,
                 },
                 ml_signal={
                     "ml_score": ml_prediction.ml_score if ml_prediction else int(regime_score),
@@ -753,6 +780,53 @@ class TradingPipeline:
         except Exception:
             pass
         return 0.0
+
+    def _fetch_intraday_context(self, symbol: str) -> dict:
+        """
+        ดึง VWAP, day_high, day_low, prev_close จาก 15m data
+        ใช้ส่งให้ Gate 19 LLM เพื่อวิเคราะห์ entry/TP/period ได้แม่นยำ
+
+        Returns:
+            {"vwap": float, "day_high": float, "day_low": float, "prev_close": float}
+        """
+        result = {"vwap": 0.0, "day_high": 0.0, "day_low": 0.0, "prev_close": 0.0}
+        try:
+            from data_pipeline_manager import safe_download, compute_vwap
+            df = safe_download(symbol, period="5d", interval="15m")
+            if df.empty or len(df) < 5:
+                return result
+
+            # ── VWAP (latest value)
+            vwap_series = compute_vwap(df)
+            if not vwap_series.empty:
+                result["vwap"] = round(float(vwap_series.iloc[-1]), 2)
+
+            # ── Day high/low (today's bars only)
+            if hasattr(df.index, 'date'):
+                try:
+                    idx = df.index
+                    if hasattr(idx, 'tz') and idx.tz is not None:
+                        today = idx.tz_localize(None).date[-1]
+                        dates = idx.tz_localize(None).date
+                    else:
+                        today = idx.date[-1]
+                        dates = idx.date
+                    today_mask = [d == today for d in dates]
+                    today_df = df[today_mask]
+                    if not today_df.empty:
+                        result["day_high"] = round(float(today_df["high"].max()), 2)
+                        result["day_low"]  = round(float(today_df["low"].min()), 2)
+                except Exception:
+                    result["day_high"] = round(float(df["high"].iloc[-20:].max()), 2)
+                    result["day_low"]  = round(float(df["low"].iloc[-20:].min()), 2)
+
+            # ── Prev close
+            result["prev_close"] = self._fetch_prev_close(symbol)
+
+        except Exception as e:
+            logger.debug(f"[{symbol}] _fetch_intraday_context error: {e}")
+
+        return result
 
     def _fetch_15m_bars(self, symbol: str, bars: int = 30) -> Optional["pd.DataFrame"]:
         """ดึง 15m OHLCV bars สำหรับ Worst Case Gate"""
@@ -977,12 +1051,32 @@ class TradingPipeline:
 # RUNNERS
 # ============================================================
 
+def _get_scan_symbols(pipeline) -> list:
+    """ดึง symbols ที่ TechnicalScanner ควรสแกน"""
+    if pipeline._tiers:
+        if pipeline.tech_scanner and pipeline.tech_scanner.config.scan_tier1_only:
+            return pipeline._tiers.tier1_hot
+        return pipeline._tiers.tier1_hot + pipeline._tiers.tier2_warm
+    return list(pipeline.cfg.ML_WATCHLIST)
+
+
 def run_live(args):
     Config.load_profile(args.profile)
     Config.validate(args.mode)
 
     pipeline = TradingPipeline(mode=args.mode, dry_run=args.dry_run)
     pipeline.register_shutdown()
+
+    # ── Technical Scanner (if enabled)
+    if getattr(args, 'enable_tech_scan', False):
+        try:
+            from technical_scanner import TechnicalScanner, TechScanConfig
+            tech_cfg = TechScanConfig.from_env()
+            tech_cfg.enabled = True
+            pipeline.tech_scanner = TechnicalScanner(config=tech_cfg)
+            logger.info(f"🔬 TechnicalScanner ENABLED | rules={sorted(tech_cfg.active_rules)}")
+        except ImportError:
+            logger.warning("⚠️ technical_scanner.py not found → TechScan disabled")
 
     threading.Thread(target=pipeline._time_kill_watcher,
                      name="time-kill", daemon=True).start()
@@ -1017,6 +1111,22 @@ def run_live(args):
             t = now_et()
             if t.minute % 15 == 0:
                 logger.debug(f"⏰ 15m tick: {t.strftime('%H:%M')} ET")
+
+                # ── Technical Scanner: scan ทุก 15m candle close
+                if pipeline.tech_scanner and pipeline.tech_scanner.config.enabled:
+                    try:
+                        scan_symbols = _get_scan_symbols(pipeline)
+                        tech_candidates = pipeline.tech_scanner.scan_tick(
+                            scan_symbols, pipeline,
+                        )
+                        for tc in tech_candidates:
+                            try:
+                                pipeline.process_news(tc)
+                            except Exception as e:
+                                logger.error(f"Tech signal pipeline error: {e}")
+                    except Exception as e:
+                        logger.error(f"TechScan tick error: {e}", exc_info=True)
+
             # Sleep until next 15m boundary
             secs_to_next = max(1, (15 - t.minute % 15) * 60 - t.second)
             pipeline._stop.wait(min(secs_to_next, 60))
@@ -1031,6 +1141,8 @@ def run_live(args):
         if pipeline.wc_gate:
             wc_stats = pipeline.wc_gate.get_stats()
             logger.info(f"Gate WC stats: {wc_stats}")
+        if pipeline.tech_scanner:
+            logger.info(f"TechScan stats: {pipeline.tech_scanner.get_stats()}")
 
 
 def _load_watchlist_from_universe() -> list[str]:
@@ -1235,6 +1347,56 @@ def run_report(args):
     journal.print_performance_report()
 
 
+def run_shadow(args):
+    """
+    Shadow Mode — Full pipeline observation without order execution.
+
+    Two sub-modes:
+      1. One-shot (default): สแกนครั้งเดียว แสดงผลทุก gate แล้วจบ
+      2. Live shadow (--live-shadow): วิ่งคู่ตลาดจริง รอข่าว แสดงผล ไม่สั่ง order
+    """
+    Config.load_profile(args.profile)
+
+    # ── Parse skip-gates
+    skip_gates = set()
+    if args.skip_gates:
+        skip_gates = set(g.strip().lower() for g in args.skip_gates.split(",") if g.strip())
+
+    # ── Parse shadow-symbols
+    shadow_symbols = None
+    if args.shadow_symbols:
+        shadow_symbols = [s.strip().upper() for s in args.shadow_symbols.split(",") if s.strip()]
+
+    # ── Parse watchlist file
+    watchlist_file = args.shadow_watchlist if args.shadow_watchlist else None
+
+    # ── Create pipeline (always dry_run=True for safety)
+    pipeline = TradingPipeline(mode="paper", dry_run=True)
+
+    # ── Technical Scanner (if enabled)
+    if getattr(args, 'enable_tech_scan', False):
+        try:
+            from technical_scanner import TechnicalScanner, TechScanConfig
+            tech_cfg = TechScanConfig.from_env()
+            tech_cfg.enabled = True
+            pipeline.tech_scanner = TechnicalScanner(config=tech_cfg)
+            logger.info(f"🔬 TechnicalScanner ENABLED in Shadow | rules={sorted(tech_cfg.active_rules)}")
+        except ImportError:
+            logger.warning("⚠️ technical_scanner.py not found → TechScan disabled")
+
+    # ── Run
+    from shadow_runner import run_shadow_oneshot, run_shadow_live
+
+    if args.live_shadow:
+        run_shadow_live(pipeline, skip_gates=skip_gates,
+                        shadow_symbols=shadow_symbols,
+                        watchlist_file=watchlist_file)
+    else:
+        run_shadow_oneshot(pipeline, skip_gates=skip_gates,
+                           shadow_symbols=shadow_symbols,
+                           watchlist_file=watchlist_file)
+
+
 # ============================================================
 # CLI
 # ============================================================
@@ -1247,15 +1409,43 @@ def main():
         description="Universal 15m Quant Engine + LLM CIO (Gate 19)")
     parser.add_argument("--profile", choices=profiles, default="TTP_5K_FLEX",
                         help=f"Prop firm profile: {profiles}")
-    parser.add_argument("--mode", choices=["paper", "live"], default="paper")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--report", action="store_true")
+    parser.add_argument("--mode", choices=["paper", "live", "shadow"], default="paper",
+                        help="paper=mock exec, live=real orders, shadow=observe only")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Quick test with mock + SEC EDGAR data")
+    parser.add_argument("--report", action="store_true",
+                        help="Print journal report and exit")
+
+    # ── Shadow mode options
+    shadow_group = parser.add_argument_group("shadow mode options")
+    shadow_group.add_argument("--live-shadow", action="store_true",
+                              help="Run shadow mode continuously (like live, but no orders)")
+    shadow_group.add_argument("--skip-gates", type=str, default="",
+                              help="Comma-separated gate IDs to skip. "
+                                   "Available: daily_loss,session,sentiment,price,"
+                                   "universe,regime,ml,max_orders,rate_limit,"
+                                   "wash_sale,no_hedge,streak,risk,gate19")
+    shadow_group.add_argument("--shadow-symbols", type=str, default="",
+                              help="Comma-separated symbols to analyze (default: watchlist)")
+    shadow_group.add_argument("--shadow-watchlist", type=str, default="",
+                              help="Path to watchlist file (.json/.csv/.txt). "
+                                   "Supports: universe.json, JSON array, CSV with "
+                                   "symbol/ticker column, or text (1 per line)")
+
+    # ── Technical Scanner
+    tech_group = parser.add_argument_group("technical scanner")
+    tech_group.add_argument("--enable-tech-scan", action="store_true",
+                            help="Enable 15m technical scanning (VWAP pullback, "
+                                 "ML breakout, volume spike). Works in all modes.")
+
     args = parser.parse_args()
 
     if args.report:
         run_report(args)
     elif args.dry_run:
         run_dry_run(args)
+    elif args.mode == "shadow":
+        run_shadow(args)
     else:
         if args.mode == "live":
             confirm = input("\n⚠️ LIVE MODE! Type 'CONFIRM': ").strip()
