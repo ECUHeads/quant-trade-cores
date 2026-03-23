@@ -1,0 +1,2420 @@
+"""
+shadow_runner.py
+================
+Shadow Mode — Full Pipeline Observation Without Order Execution
+
+Purpose:
+  วิ่ง pipeline จริงทุกขั้น (data จริง, gates จริง) แต่ไม่สั่ง order
+  บันทึกผลทุก gate แบบ "log & continue" แทน "block & return"
+  ใช้สำหรับ:
+    1. ดูว่า pipeline ตัดสินใจอย่างไรในแต่ละ gate
+    2. ทดสอบ gate combinations โดยไม่เสี่ยง
+    3. วิเคราะห์ว่า gate ไหน block บ่อย → ปรับ threshold
+
+Usage:
+  # One-shot: สแกนครั้งเดียว แสดงผล แล้วจบ
+  python main.py --profile TTP_5K_FLEX --mode shadow
+
+  # Live shadow: วิ่งคู่ตลาดจริง ไม่หยุด
+  python main.py --profile TTP_5K_FLEX --mode shadow --live-shadow
+
+  # ข้าม gate ที่ไม่ต้องการ
+  python main.py --mode shadow --skip-gates gate19,session
+
+  # ข้าม gate + กำหนด symbols เอง
+  python main.py --mode shadow --skip-gates gate19 --shadow-symbols NVDA,TSLA,META
+
+  # โหลด watchlist จากไฟล์ (รองรับ .json, .csv, .txt)
+  python main.py --mode shadow --shadow-watchlist ./universe.json
+  python main.py --mode shadow --shadow-watchlist ./my_picks.json
+  python main.py --mode shadow --shadow-watchlist ./watchlist.csv
+  python main.py --mode shadow --shadow-watchlist ./tickers.txt
+
+  # รวม watchlist file + skip gates + live
+  python main.py --mode shadow --shadow-watchlist ./universe.json --skip-gates gate19 --live-shadow
+
+Watchlist File Formats:
+  1. universe.json  — {"symbols": ["NVDA", ...], "symbol_data": {...}}
+  2. JSON array     — ["NVDA", "TSLA", "META"]
+  3. CSV            — คอลัมน์ symbol/ticker (หรือคอลัมน์แรก)
+  4. Text (.txt)    — 1 symbol ต่อบรรทัด (รองรับ # comment)
+
+Skippable Gates:
+  daily_loss, session, sentiment, price, universe, regime,
+  ml, max_orders, rate_limit, wash_sale, no_hedge,
+  streak, risk, gate19
+
+Output:
+  Console: สรุปทุก candidate + gate results (color-coded)
+  JSON:    ./shadow_reports/shadow_YYYY-MM-DD_HHMMSS.json
+"""
+
+import os
+import json
+import time
+import logging
+import threading
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+from pathlib import Path
+
+logger = logging.getLogger("Shadow")
+
+_TZ_ET = ZoneInfo("America/New_York")
+
+
+# ============================================================
+# DATA MODELS
+# ============================================================
+
+@dataclass
+class GateResult:
+    """ผลลัพธ์ของแต่ละ gate"""
+    gate_name:   str
+    gate_id:     str            # short key สำหรับ --skip-gates
+    passed:      bool
+    skipped:     bool  = False  # True ถ้าถูก --skip-gates ข้าม
+    detail:      str   = ""
+    value:       float = 0.0    # ค่าที่คำนวณได้ (score, price, etc.)
+
+    @property
+    def icon(self) -> str:
+        if self.skipped:
+            return "⏭️"
+        return "✅" if self.passed else "⛔"
+
+    def to_dict(self) -> dict:
+        return {
+            "gate": self.gate_name,
+            "id": self.gate_id,
+            "passed": self.passed,
+            "skipped": self.skipped,
+            "detail": self.detail,
+            "value": self.value,
+        }
+
+
+@dataclass
+class ShadowCandidate:
+    """ผลวิเคราะห์ครบทุก gate สำหรับ candidate 1 ตัว"""
+    symbol:         str
+    catalyst_type:  str
+    urgency:        int
+    headline:       str
+    source:         str
+    timestamp:      str  = ""
+    side:           str  = ""
+
+    # Gate results (populated as pipeline runs)
+    gate_results:   list = field(default_factory=list)
+
+    # Trade setup (populated if passes through risk gate)
+    entry_price:    float = 0.0
+    stop_loss:      float = 0.0
+    take_profit:    float = 0.0
+    shares:         int   = 0
+    atr_15m:        float = 0.0
+    regime_score:   float = 0.0
+    ml_score:       float = 0.0
+    ml_confidence:  float = 0.0
+    combined_score: float = 0.0
+    cio_action:      str   = ""
+    cio_reasoning:   str   = ""
+    cio_reasoning_th: str  = ""
+    cio_reasoning_en: str  = ""
+    cio_multiplier:  float = 0.0
+    cio_support:     float = 0.0
+    cio_resistance:  float = 0.0
+    cio_cutloss:     float = 0.0
+    cio_rec_shares:  int   = 0
+    cio_rec_entry:   float = 0.0
+    cio_rec_tp:      float = 0.0
+    cio_exp_period:  str   = ""
+
+    @property
+    def gates_passed(self) -> int:
+        return sum(1 for g in self.gate_results if g.passed or g.skipped)
+
+    @property
+    def gates_failed(self) -> int:
+        return sum(1 for g in self.gate_results if not g.passed and not g.skipped)
+
+    @property
+    def gates_skipped(self) -> int:
+        return sum(1 for g in self.gate_results if g.skipped)
+
+    @property
+    def would_trade(self) -> bool:
+        """True ถ้าทุก gate ผ่าน (ไม่นับ skipped)"""
+        return all(g.passed or g.skipped for g in self.gate_results)
+
+    @property
+    def blocking_gates(self) -> list:
+        return [g.gate_name for g in self.gate_results if not g.passed and not g.skipped]
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol":         self.symbol,
+            "catalyst_type":  self.catalyst_type,
+            "urgency":        self.urgency,
+            "headline":       self.headline,
+            "source":         self.source,
+            "timestamp":      self.timestamp,
+            "side":           self.side,
+            "would_trade":    self.would_trade,
+            "gates_passed":   self.gates_passed,
+            "gates_failed":   self.gates_failed,
+            "gates_skipped":  self.gates_skipped,
+            "blocking_gates": self.blocking_gates,
+            "gate_results":   [g.to_dict() for g in self.gate_results],
+            "trade_setup": {
+                "entry_price":    self.entry_price,
+                "stop_loss":      self.stop_loss,
+                "take_profit":    self.take_profit,
+                "shares":         self.shares,
+                "atr_15m":        round(self.atr_15m, 4),
+                "regime_score":   round(self.regime_score, 2),
+                "ml_score":       round(self.ml_score, 2),
+                "ml_confidence":  round(self.ml_confidence, 2),
+                "combined_score": round(self.combined_score, 2),
+                "cio_action":      self.cio_action,
+                "cio_reasoning_th": self.cio_reasoning_th,
+                "cio_reasoning_en": self.cio_reasoning_en,
+                "cio_multiplier":  round(self.cio_multiplier, 2),
+                "cio_support":     self.cio_support,
+                "cio_resistance":  self.cio_resistance,
+                "cio_cutloss":     self.cio_cutloss,
+                "cio_rec_shares":  self.cio_rec_shares,
+                "cio_rec_entry":   self.cio_rec_entry,
+                "cio_rec_tp":      self.cio_rec_tp,
+                "cio_exp_period":  self.cio_exp_period,
+            },
+        }
+
+
+@dataclass
+class ShadowReport:
+    """รายงานสรุปของ shadow session"""
+    profile:     str
+    mode:        str            # "one-shot" | "live-shadow"
+    started_at:  str  = ""
+    ended_at:    str  = ""
+    skip_gates:  list = field(default_factory=list)
+    candidates:  list = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return len(self.candidates)
+
+    @property
+    def would_trade_count(self) -> int:
+        return sum(1 for c in self.candidates if c.would_trade)
+
+    @property
+    def blocked_count(self) -> int:
+        return self.total - self.would_trade_count
+
+    def to_dict(self) -> dict:
+        return {
+            "meta": {
+                "profile":        self.profile,
+                "mode":           self.mode,
+                "started_at":     self.started_at,
+                "ended_at":       self.ended_at,
+                "skip_gates":     self.skip_gates,
+            },
+            "summary": {
+                "total_candidates":  self.total,
+                "would_trade":       self.would_trade_count,
+                "blocked":           self.blocked_count,
+                "gate_block_freq":   self._gate_block_frequency(),
+            },
+            "candidates": [c.to_dict() for c in self.candidates],
+        }
+
+    def _gate_block_frequency(self) -> dict:
+        """นับว่า gate ไหน block บ่อยที่สุด"""
+        freq = {}
+        for c in self.candidates:
+            for g in c.gate_results:
+                if not g.passed and not g.skipped:
+                    freq[g.gate_id] = freq.get(g.gate_id, 0) + 1
+        return dict(sorted(freq.items(), key=lambda x: -x[1]))
+
+
+# ============================================================
+# ALL SKIPPABLE GATE IDs
+# ============================================================
+
+ALL_GATE_IDS = {
+    "daily_loss", "session", "sentiment", "price", "universe",
+    "regime", "ml", "max_orders", "rate_limit", "wash_sale",
+    "no_hedge", "streak", "risk", "gate19",
+}
+
+
+# ============================================================
+# SHADOW RUNNER
+# ============================================================
+
+class ShadowRunner:
+    """
+    Shadow Mode Pipeline — observe everything, execute nothing.
+
+    Wraps TradingPipeline but overrides process_news to:
+      1. Run all gates (never return early)
+      2. Record pass/fail/skip for each gate
+      3. Never submit orders
+      4. Collect results into ShadowReport
+    """
+
+    def __init__(
+        self,
+        pipeline,               # TradingPipeline instance (dry_run=True)
+        skip_gates: set = None,
+        shadow_symbols: list = None,
+        is_live: bool = False,
+    ):
+        self.pipeline       = pipeline
+        self.skip_gates     = skip_gates or set()
+        self.shadow_symbols = shadow_symbols  # None = all candidates
+        self.is_live        = is_live
+
+        # Validate skip_gates
+        invalid = self.skip_gates - ALL_GATE_IDS
+        if invalid:
+            logger.warning(
+                f"Unknown gate IDs in --skip-gates: {invalid}. "
+                f"Valid: {sorted(ALL_GATE_IDS)}"
+            )
+            self.skip_gates -= invalid
+
+        self.report = ShadowReport(
+            profile=pipeline.cfg._active_profile_name or "unknown",
+            mode="live-shadow" if is_live else "one-shot",
+            started_at=datetime.now(_TZ_ET).isoformat(),
+            skip_gates=sorted(self.skip_gates),
+        )
+
+        logger.info(f"{'='*60}")
+        logger.info(f"  👁️  SHADOW MODE — {'LIVE' if is_live else 'ONE-SHOT'}")
+        logger.info(f"  Profile: {self.report.profile}")
+        if self.skip_gates:
+            logger.info(f"  Skip gates: {sorted(self.skip_gates)}")
+        if self.shadow_symbols:
+            logger.info(f"  Symbols: {self.shadow_symbols}")
+        logger.info(f"{'='*60}")
+
+    # ------------------------------------------
+    # GATE HELPERS
+    # ------------------------------------------
+
+    def _is_skipped(self, gate_id: str) -> bool:
+        return gate_id in self.skip_gates
+
+    def _gate(self, gate_id: str, gate_name: str, passed: bool,
+              detail: str = "", value: float = 0.0) -> GateResult:
+        """สร้าง GateResult — ถ้าอยู่ใน skip_gates ให้ mark เป็น skipped"""
+        skipped = self._is_skipped(gate_id)
+        return GateResult(
+            gate_name=gate_name,
+            gate_id=gate_id,
+            passed=passed if not skipped else True,
+            skipped=skipped,
+            detail=f"SKIPPED by --skip-gates" if skipped else detail,
+            value=value,
+        )
+
+    # ------------------------------------------
+    # MAIN: Process one candidate (non-blocking)
+    # ------------------------------------------
+
+    def process_candidate(self, candidate) -> ShadowCandidate:
+        """
+        รันทุก gate สำหรับ candidate 1 ตัว — ไม่ block, ไม่สั่ง order
+
+        Returns:
+            ShadowCandidate พร้อมผลทุก gate
+        """
+        sym = candidate.symbol
+        p   = self.pipeline  # shortcut
+
+        sc = ShadowCandidate(
+            symbol=sym,
+            catalyst_type=candidate.catalyst_type,
+            urgency=candidate.urgency_score,
+            headline=candidate.headline,
+            source=candidate.source,
+            timestamp=candidate.timestamp.isoformat() if hasattr(candidate.timestamp, 'isoformat') else str(candidate.timestamp),
+        )
+
+        # ── Side
+        sc.side = p._determine_side(candidate.catalyst_type)
+
+        # ── GATE 0: Tier check (informational only in shadow)
+        tier = 0
+        if p._tiers:
+            tier = p._tiers.get_tier(sym)
+
+        # ── GATE 1: Daily Loss Kill-Switch
+        try:
+            health = p.executor.check_system_health(
+                max_daily_loss=p.cfg.MAX_DAILY_LOSS_USD)
+            pnl = health.get("today_pnl", 0.0)
+            limit = p.cfg.MAX_DAILY_LOSS_USD - p.cfg.DAILY_LOSS_BUFFER
+            gate1_pass = abs(min(pnl, 0)) < limit
+            sc.gate_results.append(self._gate(
+                "daily_loss", "Gate 1: Daily Loss",
+                gate1_pass,
+                f"pnl=${pnl:.2f}, limit=${limit:.2f}",
+                value=pnl,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "daily_loss", "Gate 1: Daily Loss",
+                True, f"check failed ({e}), assume pass",
+            ))
+
+        # ── GATE 2: Session + No-New-Entry
+        try:
+            from ext_data.news_scanner import MarketSessionFilter
+            sf = p.session_filter
+            session = sf.current_session()
+            session_ok = sf.is_tradeable(session, candidate.catalyst_type)
+
+            from datetime import datetime as dt
+            t = datetime.now(_TZ_ET)
+            h_cut, m_cut = p.cfg.NO_NEW_ENTRY_AFTER
+            time_ok = not (t.hour > h_cut or (t.hour == h_cut and t.minute >= m_cut))
+
+            gate2_pass = session_ok and time_ok
+            detail = f"session={session}, time={t.strftime('%H:%M')} ET"
+            if not session_ok:
+                detail += " [session not tradeable]"
+            if not time_ok:
+                detail += f" [past {h_cut}:{m_cut:02d} cutoff]"
+            sc.gate_results.append(self._gate(
+                "session", "Gate 2: Session",
+                gate2_pass, detail,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "session", "Gate 2: Session",
+                True, f"check failed ({e}), assume pass",
+            ))
+
+        # ── GATE 3: Sentiment
+        try:
+            sentiment = p._get_market_sentiment()
+            sent_score = sentiment.get("sentiment_score", 0.5)
+            vix = sentiment.get("vix", 20.0)
+            gate3_pass = sent_score >= 0.35
+            sc.gate_results.append(self._gate(
+                "sentiment", "Gate 3: Sentiment",
+                gate3_pass,
+                f"score={sent_score:.2f}, vix={vix:.1f}, threshold=0.35",
+                value=sent_score,
+            ))
+        except Exception as e:
+            sentiment = {"sentiment_score": 0.5, "vix": 20.0}
+            sc.gate_results.append(self._gate(
+                "sentiment", "Gate 3: Sentiment",
+                True, f"fetch failed ({e}), default=0.5",
+                value=0.5,
+            ))
+
+        # ── GATE 4: Price
+        price = None
+        try:
+            price = p._fetch_price(sym)
+            gate4_pass = price is not None and price > 0
+            sc.gate_results.append(self._gate(
+                "price", "Gate 4: Price",
+                gate4_pass,
+                f"${price:.2f}" if price else "fetch failed",
+                value=price or 0.0,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "price", "Gate 4: Price",
+                False, f"error: {e}",
+            ))
+
+        if not price and not self._is_skipped("price"):
+            # ราคาไม่ได้ → gate ถัดไปทำไม่ได้จริงๆ → record ที่เหลือเป็น N/A
+            for gid, gname in [("universe", "Gate 5"), ("regime", "Gate 6"),
+                                ("ml", "Gate ML"), ("max_orders", "Gate A"),
+                                ("rate_limit", "Gate B"), ("wash_sale", "Gate C"),
+                                ("no_hedge", "Gate H"), ("streak", "Gate I"),
+                                ("risk", "Gate 7"), ("gate19", "Gate 19")]:
+                sc.gate_results.append(GateResult(
+                    gate_name=gname, gate_id=gid,
+                    passed=False, detail="skipped — no price data",
+                ))
+            self.report.candidates.append(sc)
+            return sc
+
+        if price is None:
+            price = 0.0  # skipped price gate — use 0 as placeholder
+
+        sc.entry_price = round(price * (1.002 if sc.side == "buy" else 0.998), 2)
+
+        # ── GATE 5: Universe Filter
+        try:
+            if p.preprocessor:
+                prev_close = p._fetch_prev_close(sym)
+                gate5_pass = p.preprocessor.check_tradeable(sym, price, prev_close)
+                sc.gate_results.append(self._gate(
+                    "universe", "Gate 5: Universe",
+                    gate5_pass,
+                    f"price=${price:.2f}, prev_close=${prev_close:.2f}",
+                ))
+            else:
+                sc.gate_results.append(self._gate(
+                    "universe", "Gate 5: Universe",
+                    True, "no preprocessor loaded, assume pass",
+                ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "universe", "Gate 5: Universe",
+                False, f"error: {e}",
+            ))
+
+        # ── GATE 6: Regime Scorer
+        try:
+            score_result = p._score_stock(sym, sentiment)
+            regime_score = score_result.get("Final_Weighted_Score", 0)
+            sc.regime_score = regime_score
+            gate6_pass = regime_score >= 50
+            sc.gate_results.append(self._gate(
+                "regime", "Gate 6: Regime",
+                gate6_pass,
+                f"score={regime_score:.1f}, threshold=50",
+                value=regime_score,
+            ))
+        except Exception as e:
+            sc.regime_score = 0
+            sc.gate_results.append(self._gate(
+                "regime", "Gate 6: Regime",
+                False, f"error: {e}",
+            ))
+
+        # ── GATE ML: ML Analyzer
+        try:
+            session_str = ""
+            try:
+                session_str = p.session_filter.current_session()
+            except Exception:
+                session_str = "MARKET"
+
+            ml_prediction = p._run_ml_gate(
+                sym, candidate.catalyst_type,
+                candidate.urgency_score, session_str,
+            )
+            if ml_prediction:
+                sc.ml_score = ml_prediction.ml_score
+                sc.ml_confidence = ml_prediction.confidence
+                gate_ml_pass = ml_prediction.ml_score >= p.cfg.ML_SCORE_MIN
+                sc.gate_results.append(self._gate(
+                    "ml", "Gate ML: ML Analyzer",
+                    gate_ml_pass,
+                    f"score={ml_prediction.ml_score}, conf={ml_prediction.confidence:.2f}, "
+                    f"threshold={p.cfg.ML_SCORE_MIN}",
+                    value=ml_prediction.ml_score,
+                ))
+            else:
+                sc.gate_results.append(self._gate(
+                    "ml", "Gate ML: ML Analyzer",
+                    True, "no model available, pass-through",
+                ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "ml", "Gate ML: ML Analyzer",
+                True, f"error ({e}), pass-through",
+            ))
+
+        # ── Combined score
+        combined_score = sc.regime_score
+        if sc.ml_score > 0:
+            combined_score = (
+                p.cfg.SCORE_REGIME_WEIGHT * sc.regime_score +
+                p.cfg.SCORE_ML_WEIGHT * sc.ml_score
+            )
+        sc.combined_score = combined_score
+
+        # ── GATE A: Max orders/day
+        sc.gate_results.append(self._gate(
+            "max_orders", "Gate A: Max Orders",
+            p._daily_order_count < p.cfg.MAX_ORDERS_PER_DAY,
+            f"today={p._daily_order_count}/{p.cfg.MAX_ORDERS_PER_DAY}",
+            value=p._daily_order_count,
+        ))
+
+        # ── GATE B: Rate limiter
+        elapsed = time.time() - p._last_order_time
+        sc.gate_results.append(self._gate(
+            "rate_limit", "Gate B: Rate Limit",
+            elapsed >= p.cfg.ORDER_COOLDOWN_SEC,
+            f"elapsed={elapsed:.1f}s, cooldown={p.cfg.ORDER_COOLDOWN_SEC}s",
+        ))
+
+        # ── GATE C: Wash-sale
+        unlock = p._symbol_cooldown.get(sym, 0.0)
+        wash_ok = time.time() >= unlock
+        sc.gate_results.append(self._gate(
+            "wash_sale", "Gate C: Wash-Sale",
+            wash_ok,
+            f"{'clear' if wash_ok else f'cooldown {unlock - time.time():.0f}s remaining'}",
+        ))
+
+        # ── GATE H: No hedge
+        sc.gate_results.append(self._gate(
+            "no_hedge", "Gate H: No Hedge",
+            sym not in p._open_trades,
+            f"{'no position' if sym not in p._open_trades else 'already open'}",
+        ))
+
+        # ── GATE I: Streak
+        try:
+            streak_halted = p.journal.check_streak_halt(p.cfg.STREAK_BLOCK)
+            streak_count  = p.journal.compute_daily_streak()
+            sc.gate_results.append(self._gate(
+                "streak", "Gate I: Streak",
+                not streak_halted,
+                f"consecutive_losses={streak_count}, block_at={p.cfg.STREAK_BLOCK}",
+                value=streak_count,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "streak", "Gate I: Streak",
+                True, f"check failed ({e}), assume pass",
+            ))
+
+        # ── ATR + SL/TP calculation
+        try:
+            atr = p._fetch_atr_15m(sym)
+            if atr <= 0:
+                atr = price * 0.005 if price > 0 else 0.5
+            sc.atr_15m = atr
+
+            entry = sc.entry_price
+            if p.risk:
+                stop_price, target_price = p.risk.calculate_atr_levels(entry, atr, sc.side)
+            else:
+                offset = atr * p.cfg.ATR_STOP_MULT
+                if sc.side == "buy":
+                    stop_price = round(entry - offset, 2)
+                    target_price = round(entry + offset * p.cfg.RR_TARGET, 2)
+                else:
+                    stop_price = round(entry + offset, 2)
+                    target_price = round(entry - offset * p.cfg.RR_TARGET, 2)
+
+            sc.stop_loss = stop_price
+            sc.take_profit = target_price
+        except Exception as e:
+            logger.debug(f"ATR calc failed for {sym}: {e}")
+
+        # ── GATE 7: Risk Manager
+        try:
+            if p.risk and price > 0:
+                order_spec = p.risk.calculate_order(
+                    symbol=sym, side=sc.side, entry_price=sc.entry_price,
+                    stop_loss_price=sc.stop_loss,
+                    current_daily_loss=abs(p._today_pnl) if p._today_pnl < 0 else 0,
+                )
+                gate7_pass = order_spec.get("status") == "APPROVED"
+                sc.shares = order_spec.get("size", 0) if gate7_pass else 0
+                sc.gate_results.append(self._gate(
+                    "risk", "Gate 7: Risk Manager",
+                    gate7_pass,
+                    f"{'APPROVED' if gate7_pass else order_spec.get('reason', 'REJECTED')}"
+                    f" | {sc.shares} shares" if gate7_pass else "",
+                    value=sc.shares,
+                ))
+            else:
+                sc.shares = 10  # fallback
+                sc.gate_results.append(self._gate(
+                    "risk", "Gate 7: Risk Manager",
+                    True, "no risk manager, fallback 10 shares",
+                    value=10,
+                ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "risk", "Gate 7: Risk Manager",
+                False, f"error: {e}",
+            ))
+
+        # ── GATE 19: LLM CIO
+        if self._is_skipped("gate19"):
+            sc.gate_results.append(self._gate(
+                "gate19", "Gate 19: LLM CIO",
+                True, "SKIPPED by --skip-gates",
+            ))
+            sc.cio_action = "SKIPPED"
+        else:
+            try:
+                ml_prediction = None
+                if sc.ml_score > 0:
+                    # Build minimal MLPrediction-like dict for gate19
+                    class _MockML:
+                        ml_score = sc.ml_score
+                        direction_prob = 0.5
+                        confidence = sc.ml_confidence
+                        top_features = []
+                    ml_prediction = _MockML()
+
+                # ── Fetch intraday context for LLM
+                intraday_ctx = {"vwap": 0, "day_high": 0, "day_low": 0, "prev_close": 0}
+                try:
+                    intraday_ctx = p._fetch_intraday_context(sym)
+                except Exception:
+                    pass
+
+                verdict = p.gate19.evaluate_trade(
+                    market_data={
+                        "symbol": sym, "price": price,
+                        "prev_close": intraday_ctx.get("prev_close", 0),
+                        "vwap": intraday_ctx.get("vwap", 0),
+                        "day_high": intraday_ctx.get("day_high", 0),
+                        "day_low": intraday_ctx.get("day_low", 0),
+                        "atr_15m": sc.atr_15m,
+                        "vix": sentiment.get("vix", 20),
+                        "spy_trend": "up" if sentiment.get("sentiment_score", 0.5) > 0.5 else "down",
+                        "session": session_str if 'session_str' in dir() else "MARKET",
+                        "timeframe": p.cfg.TIMEFRAME,
+                    },
+                    ml_signal={
+                        "ml_score": int(sc.ml_score) if sc.ml_score else int(sc.regime_score),
+                        "direction_prob": ml_prediction.direction_prob if ml_prediction else 0.5,
+                        "confidence": ml_prediction.confidence if ml_prediction else 0.5,
+                        "signal": sc.side.upper(),
+                        "top_features": [],
+                    },
+                    risk_data={
+                        "shares": sc.shares, "entry": sc.entry_price,
+                        "stop_loss": sc.stop_loss, "take_profit": sc.take_profit,
+                        "risk_usd": 0,
+                        "daily_pnl": p._today_pnl,
+                        "daily_loss_limit": p.cfg.MAX_DAILY_LOSS_USD,
+                        "trades_today": p._daily_order_count,
+                        "consecutive_losses": 0,
+                    },
+                    config_rules={
+                        "firm_name": p.cfg.FIRM_NAME,
+                        "max_daily_loss": p.cfg.MAX_DAILY_LOSS_USD,
+                        "max_orders_per_day": p.cfg.MAX_ORDERS_PER_DAY,
+                        "streak_block": p.cfg.STREAK_BLOCK,
+                        "consistency_rule": p.cfg.CONSISTENCY_RULE_PCT,
+                    },
+                    news_context=f"{candidate.catalyst_type}: {candidate.headline[:120]}",
+                )
+                sc.cio_action = verdict.action
+                sc.cio_reasoning = verdict.reasoning
+                sc.cio_reasoning_th = verdict.reasoning_th
+                sc.cio_reasoning_en = verdict.reasoning_en
+                sc.cio_multiplier = verdict.sizing_multiplier
+                sc.cio_support = verdict.support
+                sc.cio_resistance = verdict.resistance
+                sc.cio_cutloss = verdict.cutloss
+                sc.cio_rec_shares = verdict.recommended_shares
+                sc.cio_rec_entry = verdict.recommended_entry
+                sc.cio_rec_tp = verdict.recommended_tp
+                sc.cio_exp_period = verdict.expected_period
+                gate19_pass = verdict.is_go()
+
+                # Build detail string with levels
+                levels = verdict.levels_summary
+                detail = (
+                    f"{verdict.action} (mult={verdict.sizing_multiplier:.1f}) "
+                    f"| {verdict.provider} {verdict.latency_ms}ms"
+                )
+                if levels:
+                    detail += f" | {levels}"
+
+                sc.gate_results.append(self._gate(
+                    "gate19", "Gate 19: LLM CIO",
+                    gate19_pass, detail,
+                    value=verdict.sizing_multiplier,
+                ))
+            except Exception as e:
+                sc.gate_results.append(self._gate(
+                    "gate19", "Gate 19: LLM CIO",
+                    False, f"error: {e}",
+                ))
+                sc.cio_action = "ERROR"
+
+        # ── Add to report
+        self.report.candidates.append(sc)
+        return sc
+
+    # ------------------------------------------
+    # OUTPUT: Console
+    # ------------------------------------------
+
+    def print_candidate(self, sc: ShadowCandidate):
+        """พิมพ์ผล gate ของ candidate 1 ตัว"""
+        icon = "🟢" if sc.would_trade else "🔴"
+        print(f"\n{'─'*60}")
+        print(f"📰 {sc.symbol} | {sc.catalyst_type} | urgency={sc.urgency} | {sc.source}")
+        print(f"   {sc.headline[:80]}")
+
+        for g in sc.gate_results:
+            status = g.icon
+            name   = f"{g.gate_name:<25}"
+            detail = g.detail
+            print(f"  ├─ {status} {name} {detail}")
+
+        # ── CIO Analysis (bilingual + levels)
+        if sc.cio_action and sc.cio_action not in ("", "SKIPPED", "ERROR"):
+            print(f"  │")
+            print(f"  │  🤖 CIO Analysis:")
+            if sc.cio_reasoning_th:
+                print(f"  │  TH: {sc.cio_reasoning_th[:120]}")
+            if sc.cio_reasoning_en:
+                print(f"  │  EN: {sc.cio_reasoning_en[:120]}")
+            if sc.cio_support > 0 or sc.cio_resistance > 0:
+                print(f"  │  📊 Support=${sc.cio_support:.2f}  Resistance=${sc.cio_resistance:.2f}  "
+                      f"Cutloss=${sc.cio_cutloss:.2f}")
+            if sc.cio_rec_entry > 0 or sc.cio_rec_tp > 0:
+                print(f"  │  🎯 Entry=${sc.cio_rec_entry:.2f}  TP=${sc.cio_rec_tp:.2f}  "
+                      f"Period={sc.cio_exp_period or 'N/A'}")
+            if sc.cio_rec_shares > 0:
+                print(f"  │  📐 Recommended shares: {sc.cio_rec_shares}")
+
+        if sc.would_trade:
+            shares_display = sc.cio_rec_shares if sc.cio_rec_shares > 0 else sc.shares
+            if sc.cio_multiplier > 0 and sc.cio_multiplier < 1.0 and sc.cio_rec_shares <= 0:
+                shares_display = max(1, int(sc.shares * sc.cio_multiplier))
+            entry_display = sc.cio_rec_entry if sc.cio_rec_entry > 0 else sc.entry_price
+            tp_display    = sc.cio_rec_tp if sc.cio_rec_tp > 0 else sc.take_profit
+            sl_display    = sc.cio_cutloss if sc.cio_cutloss > 0 else sc.stop_loss
+            period_str    = f"  [{sc.cio_exp_period}]" if sc.cio_exp_period else ""
+            print(
+                f"  └─ {icon} WOULD TRADE: {sc.side.upper()} "
+                f"{shares_display}x {sc.symbol} @ ${entry_display:.2f} "
+                f"→ TP ${tp_display:.2f} SL ${sl_display:.2f}{period_str}"
+            )
+        else:
+            print(
+                f"  └─ {icon} BLOCKED ({sc.gates_failed} gate(s) failed: "
+                f"{', '.join(sc.blocking_gates)})"
+            )
+
+    def print_summary(self):
+        """พิมพ์สรุปทั้ง session"""
+        r = self.report
+        freq = r._gate_block_frequency()
+
+        print(f"\n{'═'*60}")
+        print(f"  👁️  SHADOW REPORT — {r.profile}")
+        print(f"  {r.started_at} → {r.ended_at}")
+        if r.skip_gates:
+            print(f"  Skipped gates: {', '.join(r.skip_gates)}")
+        print(f"{'═'*60}")
+        print(f"  Candidates: {r.total}  |  Would-Trade: {r.would_trade_count}  |  Blocked: {r.blocked_count}")
+
+        if freq:
+            print(f"\n  Gate Block Frequency:")
+            for gate_id, count in freq.items():
+                bar = "█" * count
+                print(f"    {gate_id:<15} {bar} ({count})")
+
+        # Would-trade summary
+        traders = [c for c in r.candidates if c.would_trade]
+        if traders:
+            print(f"\n  Would-Trade Setups:")
+            for c in traders:
+                shares = c.shares
+                if c.cio_multiplier > 0 and c.cio_multiplier < 1.0:
+                    shares = max(1, int(c.shares * c.cio_multiplier))
+                print(
+                    f"    🟢 {c.side.upper()} {shares}x {c.symbol} "
+                    f"@ ${c.entry_price:.2f} → TP ${c.take_profit:.2f} SL ${c.stop_loss:.2f} "
+                    f"| regime={c.regime_score:.0f} ml={c.ml_score:.0f} "
+                    f"combined={c.combined_score:.0f}"
+                )
+
+        print(f"{'═'*60}\n")
+
+    # ------------------------------------------
+    # OUTPUT: JSON
+    # ------------------------------------------
+
+    def save_json(self, output_dir: str = "./shadow_reports") -> str:
+        """บันทึก report เป็น JSON file"""
+        os.makedirs(output_dir, exist_ok=True)
+        ts = datetime.now(_TZ_ET).strftime("%Y-%m-%d_%H%M%S")
+        filename = f"shadow_{ts}.json"
+        filepath = os.path.join(output_dir, filename)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(self.report.to_dict(), f, indent=2, ensure_ascii=False)
+
+        logger.info(f"📁 Shadow report saved: {filepath}")
+        return filepath
+
+    # ------------------------------------------
+    # FINALIZE
+    # ------------------------------------------
+
+    def finalize(self):
+        """เรียกเมื่อจบ session → print summary + save JSON"""
+        self.report.ended_at = datetime.now(_TZ_ET).isoformat()
+        self.print_summary()
+        path = self.save_json()
+        return path
+
+
+# ============================================================
+# WATCHLIST LOADER — รองรับหลาย format
+# ============================================================
+
+def load_watchlist_file(filepath: str) -> list:
+    """
+    โหลด watchlist จากไฟล์ — รองรับ 4 format:
+
+    1. universe.json (ระบบ generate)
+       {"symbols": ["NVDA", "TSLA", ...], "symbol_data": {...}}
+       → ดึงจาก key "symbols"
+
+    2. JSON array
+       ["NVDA", "TSLA", "META"]
+       → ใช้ตรงๆ
+
+    3. Text file (.txt) — 1 symbol ต่อบรรทัด
+       NVDA
+       TSLA
+       META
+
+    4. CSV file (.csv) — คอลัมน์ชื่อ symbol, ticker, Symbol, Ticker, หรือคอลัมน์แรก
+       symbol,name
+       NVDA,NVIDIA
+       TSLA,Tesla
+
+    Returns:
+        list[str] — symbols (uppercase, deduplicated, ordered)
+
+    Raises:
+        FileNotFoundError: ถ้าไฟล์ไม่มี
+        ValueError: ถ้า parse ไม่ได้
+    """
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"Watchlist file not found: {filepath}")
+
+    ext = path.suffix.lower()
+    symbols = []
+
+    # ── JSON (.json)
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            # Format 2: plain JSON array ["NVDA", "TSLA"]
+            symbols = [str(s).strip().upper() for s in data if str(s).strip()]
+            logger.info(f"📋 Loaded JSON array: {len(symbols)} symbols from {path.name}")
+
+        elif isinstance(data, dict):
+            # Format 1: universe.json → {"symbols": [...]}
+            if "symbols" in data:
+                symbols = [str(s).strip().upper() for s in data["symbols"] if str(s).strip()]
+                tag = data.get("tag", "")
+                stats = data.get("stats", {})
+                logger.info(
+                    f"📋 Loaded universe.json: {len(symbols)} symbols "
+                    f"(tag={tag}, final={stats.get('final', '?')})"
+                )
+            else:
+                # อาจเป็น dict ที่ key = symbol เช่น {"NVDA": {...}, "TSLA": {...}}
+                symbols = [str(k).strip().upper() for k in data.keys()
+                           if str(k).strip() and not k.startswith("_")]
+                logger.info(f"📋 Loaded JSON dict keys: {len(symbols)} symbols from {path.name}")
+
+        if not symbols:
+            raise ValueError(f"Could not parse symbols from JSON: {filepath}")
+
+    # ── CSV (.csv)
+    elif ext == ".csv":
+        import csv
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames:
+                # หา column ที่น่าจะเป็น symbol
+                sym_col = None
+                for candidate_col in ["symbol", "Symbol", "SYMBOL",
+                                       "ticker", "Ticker", "TICKER",
+                                       "sym", "Sym", "SYM",
+                                       "code", "Code", "CODE"]:
+                    if candidate_col in reader.fieldnames:
+                        sym_col = candidate_col
+                        break
+
+                if sym_col is None:
+                    # ใช้คอลัมน์แรก
+                    sym_col = reader.fieldnames[0]
+                    logger.info(f"📋 CSV: no 'symbol'/'ticker' column found, using first column: '{sym_col}'")
+
+                for row in reader:
+                    val = row.get(sym_col, "").strip().upper()
+                    if val and val.isalpha():
+                        symbols.append(val)
+
+        if not symbols:
+            # Fallback: ลองอ่านแบบไม่มี header (1 column = symbols)
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    val = line.strip().upper()
+                    if val and val.isalpha() and len(val) <= 6:
+                        symbols.append(val)
+
+        logger.info(f"📋 Loaded CSV: {len(symbols)} symbols from {path.name}")
+
+    # ── Text file (.txt หรืออื่นๆ)
+    else:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                # รองรับทั้ง "NVDA" และ "NVDA # comment" และ "NVDA,TSLA" (comma-separated)
+                line = line.split("#")[0].strip()  # ตัด comment
+                if not line:
+                    continue
+                if "," in line:
+                    # comma-separated ในบรรทัดเดียว
+                    for part in line.split(","):
+                        val = part.strip().upper()
+                        if val and len(val) <= 6:
+                            symbols.append(val)
+                else:
+                    val = line.upper()
+                    if val and len(val) <= 6:
+                        symbols.append(val)
+
+        logger.info(f"📋 Loaded text file: {len(symbols)} symbols from {path.name}")
+
+    # ── Deduplicate (preserve order)
+    seen = set()
+    deduped = []
+    for s in symbols:
+        if s not in seen:
+            seen.add(s)
+            deduped.append(s)
+
+    if not deduped:
+        raise ValueError(f"No valid symbols found in: {filepath}")
+
+    return deduped
+
+
+# ============================================================
+# SYMBOL RESOLVER — รวม sources ทั้งหมด
+# ============================================================
+
+def resolve_symbols(
+    pipeline,
+    shadow_symbols: list = None,
+    watchlist_file: str  = None,
+) -> list:
+    """
+    รวม symbols จากทุก source ตามลำดับ priority:
+
+    Priority:
+      1. --shadow-watchlist file  (ถ้าให้มา → ใช้เป็นหลัก)
+      2. --shadow-symbols CLI     (เพิ่มเข้าไปด้วย ถ้าให้มา)
+      3. ML_WATCHLIST + Tiered    (fallback ถ้าไม่ได้ให้อะไรเลย)
+      4. Default hardcoded        (fallback สุดท้าย)
+
+    Returns:
+        list[str] — deduplicated symbols
+    """
+    symbols = []
+
+    # ── Source 1: Watchlist file
+    if watchlist_file:
+        try:
+            file_symbols = load_watchlist_file(watchlist_file)
+            symbols.extend(file_symbols)
+        except Exception as e:
+            logger.error(f"Failed to load watchlist file: {e}")
+
+    # ── Source 2: CLI --shadow-symbols
+    if shadow_symbols:
+        for s in shadow_symbols:
+            if s not in symbols:
+                symbols.append(s)
+
+    # ── Source 3: Config + Tiered (only if no explicit source given)
+    if not symbols:
+        symbols = list(pipeline.cfg.ML_WATCHLIST)
+        if pipeline._tiers:
+            for s in (pipeline._tiers.tier1_hot + pipeline._tiers.tier2_warm):
+                if s not in symbols:
+                    symbols.append(s)
+
+    # ── Source 4: Hardcoded fallback
+    if not symbols:
+        symbols = ["NVDA", "TSLA", "META", "AAPL", "AMZN"]
+
+    return symbols
+
+
+# ============================================================
+# RUN FUNCTIONS (called from main.py)
+# ============================================================
+
+def run_shadow_oneshot(pipeline, skip_gates: set,
+                       shadow_symbols: list = None,
+                       watchlist_file: str = None):
+    """
+    One-Shot Shadow: สร้าง candidates จาก watchlist → รัน pipeline → แสดงผล
+
+    Symbol resolution (priority):
+      1. --shadow-watchlist file
+      2. --shadow-symbols CLI
+      3. ML_WATCHLIST + tiered scan
+      4. Default ["NVDA", "TSLA", "META", "AAPL", "AMZN"]
+    """
+    from ext_data.news_scanner import NewsCandidate
+
+    # ── Resolve symbols
+    symbols = resolve_symbols(pipeline, shadow_symbols, watchlist_file)
+
+    runner = ShadowRunner(pipeline, skip_gates=skip_gates,
+                          shadow_symbols=symbols, is_live=False)
+
+    logger.info(f"Shadow scanning {len(symbols)} symbols: "
+                f"{symbols[:15]}{'...' if len(symbols) > 15 else ''}")
+
+    # ── Pre-market scan (optional, non-blocking)
+    try:
+        pipeline.startup_scan_and_train()
+    except Exception as e:
+        logger.warning(f"Pre-market scan failed (non-critical): {e}")
+
+    # ── Generate candidates — ใช้ NewsScanner ถ้ามี, fallback เป็น mock
+    candidates = _fetch_real_candidates(pipeline, symbols)
+
+    if not candidates:
+        logger.info("No real candidates found → generating analysis candidates from watchlist")
+        candidates = [
+            NewsCandidate(
+                symbol=sym,
+                headline=f"[SHADOW] Analysis scan for {sym}",
+                catalyst_type="OTHER",
+                urgency_score=50,
+                source="SHADOW_SCAN",
+            )
+            for sym in symbols
+        ]
+
+    # ── Process each candidate
+    for candidate in candidates:
+        sc = runner.process_candidate(candidate)
+        runner.print_candidate(sc)
+
+    # ── Finalize
+    runner.finalize()
+
+
+def run_shadow_live(pipeline, skip_gates: set,
+                    shadow_symbols: list = None,
+                    watchlist_file: str = None):
+    """
+    Live Shadow: วิ่งคู่ตลาดจริง รอข่าวเข้ามา → วิเคราะห์ → แสดงผล (ไม่สั่ง order)
+
+    ถ้าให้ watchlist_file → filter เฉพาะ symbols ที่อยู่ใน file
+    """
+    import signal as sig
+    from ext_data.news_scanner import NewsScanner, NewsCandidate
+
+    # ── Resolve symbols (ใช้เป็น filter)
+    filter_symbols = resolve_symbols(pipeline, shadow_symbols, watchlist_file)
+
+    runner = ShadowRunner(pipeline, skip_gates=skip_gates,
+                          shadow_symbols=filter_symbols, is_live=True)
+
+    stop_event = threading.Event()
+
+    # ── Pre-market scan
+    try:
+        pipeline.startup_scan_and_train()
+    except Exception as e:
+        logger.warning(f"Pre-market scan failed: {e}")
+
+    # ── Callback: เมื่อ NewsScanner พบข่าว
+    def on_news(c: NewsCandidate):
+        if filter_symbols and c.symbol not in filter_symbols:
+            return  # filter symbols
+        try:
+            sc = runner.process_candidate(c)
+            runner.print_candidate(sc)
+        except Exception as e:
+            logger.error(f"Shadow process error: {e}", exc_info=True)
+
+    # ── Start news scanner
+    scanner = NewsScanner(
+        benzinga_api_key=pipeline.cfg.BENZINGA_API_KEY or None,
+        use_sec_edgar=True,
+        min_urgency=pipeline.cfg.MIN_URGENCY,
+        callback=on_news,
+    )
+    scanner.start()
+
+    logger.info(
+        f"👁️  LIVE SHADOW — listening for news... "
+        f"(filter: {len(filter_symbols)} symbols, Ctrl+C to stop)"
+    )
+
+    # ── Graceful shutdown
+    def handler(s, frame):
+        logger.info("🛑 Shadow shutdown")
+        stop_event.set()
+
+    sig.signal(sig.SIGINT, handler)
+    sig.signal(sig.SIGTERM, handler)
+
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(60)
+    finally:
+        scanner.stop()
+        runner.finalize()
+
+
+# ============================================================
+# HELPER: Fetch real candidates
+# ============================================================
+
+def _fetch_real_candidates(pipeline, symbols: list) -> list:
+    """
+    ดึง candidates จริงจาก SEC EDGAR / Benzinga สำหรับ symbols ที่กำหนด
+    ใช้ใน one-shot mode เพื่อให้ได้ข่าวจริง (ถ้ามี)
+    """
+    candidates = []
+    try:
+        from ext_data.news_scanner import NewsScanner, NewsCandidate
+        scanner = NewsScanner(
+            benzinga_api_key=pipeline.cfg.BENZINGA_API_KEY or None,
+            use_sec_edgar=True,
+            min_urgency=30,  # ลด threshold เพื่อเก็บข่าวมากขึ้นใน shadow mode
+        )
+        # Quick poll (ไม่เปิด background thread)
+        raw = scanner._poll_all_sources()
+        if raw:
+            for c in raw:
+                if c.symbol in symbols:
+                    candidates.append(c)
+    except Exception as e:
+        logger.debug(f"Real candidate fetch failed: {e}")
+"""
+shadow_runner.py
+================
+Shadow Mode — Full Pipeline Observation Without Order Execution
+
+Purpose:
+  วิ่ง pipeline จริงทุกขั้น (data จริง, gates จริง) แต่ไม่สั่ง order
+  บันทึกผลทุก gate แบบ "log & continue" แทน "block & return"
+  ใช้สำหรับ:
+    1. ดูว่า pipeline ตัดสินใจอย่างไรในแต่ละ gate
+    2. ทดสอบ gate combinations โดยไม่เสี่ยง
+    3. วิเคราะห์ว่า gate ไหน block บ่อย → ปรับ threshold
+
+Usage:
+  # One-shot: สแกนครั้งเดียว แสดงผล แล้วจบ
+  python main.py --profile TTP_5K_FLEX --mode shadow
+
+  # Live shadow: วิ่งคู่ตลาดจริง ไม่หยุด
+  python main.py --profile TTP_5K_FLEX --mode shadow --live-shadow
+
+  # ข้าม gate ที่ไม่ต้องการ
+  python main.py --mode shadow --skip-gates gate19,session
+
+  # ข้าม gate + กำหนด symbols เอง
+  python main.py --mode shadow --skip-gates gate19 --shadow-symbols NVDA,TSLA,META
+
+  # โหลด watchlist จากไฟล์ (รองรับ .json, .csv, .txt)
+  python main.py --mode shadow --shadow-watchlist ./universe.json
+  python main.py --mode shadow --shadow-watchlist ./my_picks.json
+  python main.py --mode shadow --shadow-watchlist ./watchlist.csv
+  python main.py --mode shadow --shadow-watchlist ./tickers.txt
+
+  # รวม watchlist file + skip gates + live
+  python main.py --mode shadow --shadow-watchlist ./universe.json --skip-gates gate19 --live-shadow
+
+Watchlist File Formats:
+  1. universe.json  — {"symbols": ["NVDA", ...], "symbol_data": {...}}
+  2. JSON array     — ["NVDA", "TSLA", "META"]
+  3. CSV            — คอลัมน์ symbol/ticker (หรือคอลัมน์แรก)
+  4. Text (.txt)    — 1 symbol ต่อบรรทัด (รองรับ # comment)
+
+Skippable Gates:
+  daily_loss, session, sentiment, price, universe, regime,
+  ml, max_orders, rate_limit, wash_sale, no_hedge,
+  streak, risk, gate19
+
+Output:
+  Console: สรุปทุก candidate + gate results (color-coded)
+  JSON:    ./shadow_reports/shadow_YYYY-MM-DD_HHMMSS.json
+"""
+
+import os
+import json
+import time
+import logging
+import threading
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+from pathlib import Path
+
+logger = logging.getLogger("Shadow")
+
+_TZ_ET = ZoneInfo("America/New_York")
+
+
+# ============================================================
+# DATA MODELS
+# ============================================================
+
+@dataclass
+class GateResult:
+    """ผลลัพธ์ของแต่ละ gate"""
+    gate_name:   str
+    gate_id:     str            # short key สำหรับ --skip-gates
+    passed:      bool
+    skipped:     bool  = False  # True ถ้าถูก --skip-gates ข้าม
+    detail:      str   = ""
+    value:       float = 0.0    # ค่าที่คำนวณได้ (score, price, etc.)
+
+    @property
+    def icon(self) -> str:
+        if self.skipped:
+            return "⏭️"
+        return "✅" if self.passed else "⛔"
+
+    def to_dict(self) -> dict:
+        return {
+            "gate": self.gate_name,
+            "id": self.gate_id,
+            "passed": self.passed,
+            "skipped": self.skipped,
+            "detail": self.detail,
+            "value": self.value,
+        }
+
+
+@dataclass
+class ShadowCandidate:
+    """ผลวิเคราะห์ครบทุก gate สำหรับ candidate 1 ตัว"""
+    symbol:         str
+    catalyst_type:  str
+    urgency:        int
+    headline:       str
+    source:         str
+    timestamp:      str  = ""
+    side:           str  = ""
+
+    # Gate results (populated as pipeline runs)
+    gate_results:   list = field(default_factory=list)
+
+    # Trade setup (populated if passes through risk gate)
+    entry_price:    float = 0.0
+    stop_loss:      float = 0.0
+    take_profit:    float = 0.0
+    shares:         int   = 0
+    atr_15m:        float = 0.0
+    regime_score:   float = 0.0
+    ml_score:       float = 0.0
+    ml_confidence:  float = 0.0
+    combined_score: float = 0.0
+    cio_action:      str   = ""
+    cio_reasoning:   str   = ""
+    cio_reasoning_th: str  = ""
+    cio_reasoning_en: str  = ""
+    cio_multiplier:  float = 0.0
+    cio_support:     float = 0.0
+    cio_resistance:  float = 0.0
+    cio_cutloss:     float = 0.0
+    cio_rec_shares:  int   = 0
+    cio_rec_entry:   float = 0.0
+    cio_rec_tp:      float = 0.0
+    cio_exp_period:  str   = ""
+
+    @property
+    def gates_passed(self) -> int:
+        return sum(1 for g in self.gate_results if g.passed or g.skipped)
+
+    @property
+    def gates_failed(self) -> int:
+        return sum(1 for g in self.gate_results if not g.passed and not g.skipped)
+
+    @property
+    def gates_skipped(self) -> int:
+        return sum(1 for g in self.gate_results if g.skipped)
+
+    @property
+    def would_trade(self) -> bool:
+        """True ถ้าทุก gate ผ่าน (ไม่นับ skipped)"""
+        return all(g.passed or g.skipped for g in self.gate_results)
+
+    @property
+    def blocking_gates(self) -> list:
+        return [g.gate_name for g in self.gate_results if not g.passed and not g.skipped]
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol":         self.symbol,
+            "catalyst_type":  self.catalyst_type,
+            "urgency":        self.urgency,
+            "headline":       self.headline,
+            "source":         self.source,
+            "timestamp":      self.timestamp,
+            "side":           self.side,
+            "would_trade":    self.would_trade,
+            "gates_passed":   self.gates_passed,
+            "gates_failed":   self.gates_failed,
+            "gates_skipped":  self.gates_skipped,
+            "blocking_gates": self.blocking_gates,
+            "gate_results":   [g.to_dict() for g in self.gate_results],
+            "trade_setup": {
+                "entry_price":    self.entry_price,
+                "stop_loss":      self.stop_loss,
+                "take_profit":    self.take_profit,
+                "shares":         self.shares,
+                "atr_15m":        round(self.atr_15m, 4),
+                "regime_score":   round(self.regime_score, 2),
+                "ml_score":       round(self.ml_score, 2),
+                "ml_confidence":  round(self.ml_confidence, 2),
+                "combined_score": round(self.combined_score, 2),
+                "cio_action":      self.cio_action,
+                "cio_reasoning_th": self.cio_reasoning_th,
+                "cio_reasoning_en": self.cio_reasoning_en,
+                "cio_multiplier":  round(self.cio_multiplier, 2),
+                "cio_support":     self.cio_support,
+                "cio_resistance":  self.cio_resistance,
+                "cio_cutloss":     self.cio_cutloss,
+                "cio_rec_shares":  self.cio_rec_shares,
+                "cio_rec_entry":   self.cio_rec_entry,
+                "cio_rec_tp":      self.cio_rec_tp,
+                "cio_exp_period":  self.cio_exp_period,
+            },
+        }
+
+
+@dataclass
+class ShadowReport:
+    """รายงานสรุปของ shadow session"""
+    profile:     str
+    mode:        str            # "one-shot" | "live-shadow"
+    started_at:  str  = ""
+    ended_at:    str  = ""
+    skip_gates:  list = field(default_factory=list)
+    candidates:  list = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return len(self.candidates)
+
+    @property
+    def would_trade_count(self) -> int:
+        return sum(1 for c in self.candidates if c.would_trade)
+
+    @property
+    def blocked_count(self) -> int:
+        return self.total - self.would_trade_count
+
+    def to_dict(self) -> dict:
+        return {
+            "meta": {
+                "profile":        self.profile,
+                "mode":           self.mode,
+                "started_at":     self.started_at,
+                "ended_at":       self.ended_at,
+                "skip_gates":     self.skip_gates,
+            },
+            "summary": {
+                "total_candidates":  self.total,
+                "would_trade":       self.would_trade_count,
+                "blocked":           self.blocked_count,
+                "gate_block_freq":   self._gate_block_frequency(),
+            },
+            "candidates": [c.to_dict() for c in self.candidates],
+        }
+
+    def _gate_block_frequency(self) -> dict:
+        """นับว่า gate ไหน block บ่อยที่สุด"""
+        freq = {}
+        for c in self.candidates:
+            for g in c.gate_results:
+                if not g.passed and not g.skipped:
+                    freq[g.gate_id] = freq.get(g.gate_id, 0) + 1
+        return dict(sorted(freq.items(), key=lambda x: -x[1]))
+
+
+# ============================================================
+# ALL SKIPPABLE GATE IDs
+# ============================================================
+
+ALL_GATE_IDS = {
+    "daily_loss", "session", "sentiment", "price", "universe",
+    "regime", "ml", "max_orders", "rate_limit", "wash_sale",
+    "no_hedge", "streak", "risk", "gate19",
+}
+
+
+# ============================================================
+# SHADOW RUNNER
+# ============================================================
+
+class ShadowRunner:
+    """
+    Shadow Mode Pipeline — observe everything, execute nothing.
+
+    Wraps TradingPipeline but overrides process_news to:
+      1. Run all gates (never return early)
+      2. Record pass/fail/skip for each gate
+      3. Never submit orders
+      4. Collect results into ShadowReport
+    """
+
+    def __init__(
+        self,
+        pipeline,               # TradingPipeline instance (dry_run=True)
+        skip_gates: set = None,
+        shadow_symbols: list = None,
+        is_live: bool = False,
+    ):
+        self.pipeline       = pipeline
+        self.skip_gates     = skip_gates or set()
+        self.shadow_symbols = shadow_symbols  # None = all candidates
+        self.is_live        = is_live
+
+        # Validate skip_gates
+        invalid = self.skip_gates - ALL_GATE_IDS
+        if invalid:
+            logger.warning(
+                f"Unknown gate IDs in --skip-gates: {invalid}. "
+                f"Valid: {sorted(ALL_GATE_IDS)}"
+            )
+            self.skip_gates -= invalid
+
+        self.report = ShadowReport(
+            profile=pipeline.cfg._active_profile_name or "unknown",
+            mode="live-shadow" if is_live else "one-shot",
+            started_at=datetime.now(_TZ_ET).isoformat(),
+            skip_gates=sorted(self.skip_gates),
+        )
+
+        logger.info(f"{'='*60}")
+        logger.info(f"  👁️  SHADOW MODE — {'LIVE' if is_live else 'ONE-SHOT'}")
+        logger.info(f"  Profile: {self.report.profile}")
+        if self.skip_gates:
+            logger.info(f"  Skip gates: {sorted(self.skip_gates)}")
+        if self.shadow_symbols:
+            logger.info(f"  Symbols: {self.shadow_symbols}")
+        logger.info(f"{'='*60}")
+
+    # ------------------------------------------
+    # GATE HELPERS
+    # ------------------------------------------
+
+    def _is_skipped(self, gate_id: str) -> bool:
+        return gate_id in self.skip_gates
+
+    def _gate(self, gate_id: str, gate_name: str, passed: bool,
+              detail: str = "", value: float = 0.0) -> GateResult:
+        """สร้าง GateResult — ถ้าอยู่ใน skip_gates ให้ mark เป็น skipped"""
+        skipped = self._is_skipped(gate_id)
+        return GateResult(
+            gate_name=gate_name,
+            gate_id=gate_id,
+            passed=passed if not skipped else True,
+            skipped=skipped,
+            detail=f"SKIPPED by --skip-gates" if skipped else detail,
+            value=value,
+        )
+
+    # ------------------------------------------
+    # MAIN: Process one candidate (non-blocking)
+    # ------------------------------------------
+
+    def process_candidate(self, candidate) -> ShadowCandidate:
+        """
+        รันทุก gate สำหรับ candidate 1 ตัว — ไม่ block, ไม่สั่ง order
+
+        Returns:
+            ShadowCandidate พร้อมผลทุก gate
+        """
+        sym = candidate.symbol
+        p   = self.pipeline  # shortcut
+
+        sc = ShadowCandidate(
+            symbol=sym,
+            catalyst_type=candidate.catalyst_type,
+            urgency=candidate.urgency_score,
+            headline=candidate.headline,
+            source=candidate.source,
+            timestamp=candidate.timestamp.isoformat() if hasattr(candidate.timestamp, 'isoformat') else str(candidate.timestamp),
+        )
+
+        # ── Side
+        sc.side = p._determine_side(candidate.catalyst_type)
+
+        # ── GATE 0: Tier check (informational only in shadow)
+        tier = 0
+        if p._tiers:
+            tier = p._tiers.get_tier(sym)
+
+        # ── GATE 1: Daily Loss Kill-Switch
+        try:
+            health = p.executor.check_system_health(
+                max_daily_loss=p.cfg.MAX_DAILY_LOSS_USD)
+            pnl = health.get("today_pnl", 0.0)
+            limit = p.cfg.MAX_DAILY_LOSS_USD - p.cfg.DAILY_LOSS_BUFFER
+            gate1_pass = abs(min(pnl, 0)) < limit
+            sc.gate_results.append(self._gate(
+                "daily_loss", "Gate 1: Daily Loss",
+                gate1_pass,
+                f"pnl=${pnl:.2f}, limit=${limit:.2f}",
+                value=pnl,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "daily_loss", "Gate 1: Daily Loss",
+                True, f"check failed ({e}), assume pass",
+            ))
+
+        # ── GATE 2: Session + No-New-Entry
+        try:
+            from ext_data.news_scanner import MarketSessionFilter
+            sf = p.session_filter
+            session = sf.current_session()
+            session_ok = sf.is_tradeable(session, candidate.catalyst_type)
+
+            from datetime import datetime as dt
+            t = datetime.now(_TZ_ET)
+            h_cut, m_cut = p.cfg.NO_NEW_ENTRY_AFTER
+            time_ok = not (t.hour > h_cut or (t.hour == h_cut and t.minute >= m_cut))
+
+            gate2_pass = session_ok and time_ok
+            detail = f"session={session}, time={t.strftime('%H:%M')} ET"
+            if not session_ok:
+                detail += " [session not tradeable]"
+            if not time_ok:
+                detail += f" [past {h_cut}:{m_cut:02d} cutoff]"
+            sc.gate_results.append(self._gate(
+                "session", "Gate 2: Session",
+                gate2_pass, detail,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "session", "Gate 2: Session",
+                True, f"check failed ({e}), assume pass",
+            ))
+
+        # ── GATE 3: Sentiment
+        try:
+            sentiment = p._get_market_sentiment()
+            sent_score = sentiment.get("sentiment_score", 0.5)
+            vix = sentiment.get("vix", 20.0)
+            gate3_pass = sent_score >= 0.35
+            sc.gate_results.append(self._gate(
+                "sentiment", "Gate 3: Sentiment",
+                gate3_pass,
+                f"score={sent_score:.2f}, vix={vix:.1f}, threshold=0.35",
+                value=sent_score,
+            ))
+        except Exception as e:
+            sentiment = {"sentiment_score": 0.5, "vix": 20.0}
+            sc.gate_results.append(self._gate(
+                "sentiment", "Gate 3: Sentiment",
+                True, f"fetch failed ({e}), default=0.5",
+                value=0.5,
+            ))
+
+        # ── GATE 4: Price
+        price = None
+        try:
+            price = p._fetch_price(sym)
+            gate4_pass = price is not None and price > 0
+            sc.gate_results.append(self._gate(
+                "price", "Gate 4: Price",
+                gate4_pass,
+                f"${price:.2f}" if price else "fetch failed",
+                value=price or 0.0,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "price", "Gate 4: Price",
+                False, f"error: {e}",
+            ))
+
+        if not price and not self._is_skipped("price"):
+            # ราคาไม่ได้ → gate ถัดไปทำไม่ได้จริงๆ → record ที่เหลือเป็น N/A
+            for gid, gname in [("universe", "Gate 5"), ("regime", "Gate 6"),
+                                ("ml", "Gate ML"), ("max_orders", "Gate A"),
+                                ("rate_limit", "Gate B"), ("wash_sale", "Gate C"),
+                                ("no_hedge", "Gate H"), ("streak", "Gate I"),
+                                ("risk", "Gate 7"), ("gate19", "Gate 19")]:
+                sc.gate_results.append(GateResult(
+                    gate_name=gname, gate_id=gid,
+                    passed=False, detail="skipped — no price data",
+                ))
+            self.report.candidates.append(sc)
+            return sc
+
+        if price is None:
+            price = 0.0  # skipped price gate — use 0 as placeholder
+
+        sc.entry_price = round(price * (1.002 if sc.side == "buy" else 0.998), 2)
+
+        # ── GATE 5: Universe Filter
+        try:
+            if p.preprocessor:
+                prev_close = p._fetch_prev_close(sym)
+                gate5_pass = p.preprocessor.check_tradeable(sym, price, prev_close)
+                sc.gate_results.append(self._gate(
+                    "universe", "Gate 5: Universe",
+                    gate5_pass,
+                    f"price=${price:.2f}, prev_close=${prev_close:.2f}",
+                ))
+            else:
+                sc.gate_results.append(self._gate(
+                    "universe", "Gate 5: Universe",
+                    True, "no preprocessor loaded, assume pass",
+                ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "universe", "Gate 5: Universe",
+                False, f"error: {e}",
+            ))
+
+        # ── GATE 6: Regime Scorer
+        try:
+            score_result = p._score_stock(sym, sentiment)
+            regime_score = score_result.get("Final_Weighted_Score", 0)
+            sc.regime_score = regime_score
+            gate6_pass = regime_score >= 50
+            sc.gate_results.append(self._gate(
+                "regime", "Gate 6: Regime",
+                gate6_pass,
+                f"score={regime_score:.1f}, threshold=50",
+                value=regime_score,
+            ))
+        except Exception as e:
+            sc.regime_score = 0
+            sc.gate_results.append(self._gate(
+                "regime", "Gate 6: Regime",
+                False, f"error: {e}",
+            ))
+
+        # ── GATE ML: ML Analyzer
+        try:
+            session_str = ""
+            try:
+                session_str = p.session_filter.current_session()
+            except Exception:
+                session_str = "MARKET"
+
+            ml_prediction = p._run_ml_gate(
+                sym, candidate.catalyst_type,
+                candidate.urgency_score, session_str,
+            )
+            if ml_prediction:
+                sc.ml_score = ml_prediction.ml_score
+                sc.ml_confidence = ml_prediction.confidence
+                gate_ml_pass = ml_prediction.ml_score >= p.cfg.ML_SCORE_MIN
+                sc.gate_results.append(self._gate(
+                    "ml", "Gate ML: ML Analyzer",
+                    gate_ml_pass,
+                    f"score={ml_prediction.ml_score}, conf={ml_prediction.confidence:.2f}, "
+                    f"threshold={p.cfg.ML_SCORE_MIN}",
+                    value=ml_prediction.ml_score,
+                ))
+            else:
+                sc.gate_results.append(self._gate(
+                    "ml", "Gate ML: ML Analyzer",
+                    True, "no model available, pass-through",
+                ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "ml", "Gate ML: ML Analyzer",
+                True, f"error ({e}), pass-through",
+            ))
+
+        # ── Combined score
+        combined_score = sc.regime_score
+        if sc.ml_score > 0:
+            combined_score = (
+                p.cfg.SCORE_REGIME_WEIGHT * sc.regime_score +
+                p.cfg.SCORE_ML_WEIGHT * sc.ml_score
+            )
+        sc.combined_score = combined_score
+
+        # ── GATE A: Max orders/day
+        sc.gate_results.append(self._gate(
+            "max_orders", "Gate A: Max Orders",
+            p._daily_order_count < p.cfg.MAX_ORDERS_PER_DAY,
+            f"today={p._daily_order_count}/{p.cfg.MAX_ORDERS_PER_DAY}",
+            value=p._daily_order_count,
+        ))
+
+        # ── GATE B: Rate limiter
+        elapsed = time.time() - p._last_order_time
+        sc.gate_results.append(self._gate(
+            "rate_limit", "Gate B: Rate Limit",
+            elapsed >= p.cfg.ORDER_COOLDOWN_SEC,
+            f"elapsed={elapsed:.1f}s, cooldown={p.cfg.ORDER_COOLDOWN_SEC}s",
+        ))
+
+        # ── GATE C: Wash-sale
+        unlock = p._symbol_cooldown.get(sym, 0.0)
+        wash_ok = time.time() >= unlock
+        sc.gate_results.append(self._gate(
+            "wash_sale", "Gate C: Wash-Sale",
+            wash_ok,
+            f"{'clear' if wash_ok else f'cooldown {unlock - time.time():.0f}s remaining'}",
+        ))
+
+        # ── GATE H: No hedge
+        sc.gate_results.append(self._gate(
+            "no_hedge", "Gate H: No Hedge",
+            sym not in p._open_trades,
+            f"{'no position' if sym not in p._open_trades else 'already open'}",
+        ))
+
+        # ── GATE I: Streak
+        try:
+            streak_halted = p.journal.check_streak_halt(p.cfg.STREAK_BLOCK)
+            streak_count  = p.journal.compute_daily_streak()
+            sc.gate_results.append(self._gate(
+                "streak", "Gate I: Streak",
+                not streak_halted,
+                f"consecutive_losses={streak_count}, block_at={p.cfg.STREAK_BLOCK}",
+                value=streak_count,
+            ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "streak", "Gate I: Streak",
+                True, f"check failed ({e}), assume pass",
+            ))
+
+        # ── ATR + SL/TP calculation
+        try:
+            atr = p._fetch_atr_15m(sym)
+            if atr <= 0:
+                atr = price * 0.005 if price > 0 else 0.5
+            sc.atr_15m = atr
+
+            entry = sc.entry_price
+            if p.risk:
+                stop_price, target_price = p.risk.calculate_atr_levels(entry, atr, sc.side)
+            else:
+                offset = atr * p.cfg.ATR_STOP_MULT
+                if sc.side == "buy":
+                    stop_price = round(entry - offset, 2)
+                    target_price = round(entry + offset * p.cfg.RR_TARGET, 2)
+                else:
+                    stop_price = round(entry + offset, 2)
+                    target_price = round(entry - offset * p.cfg.RR_TARGET, 2)
+
+            sc.stop_loss = stop_price
+            sc.take_profit = target_price
+        except Exception as e:
+            logger.debug(f"ATR calc failed for {sym}: {e}")
+
+        # ── GATE 7: Risk Manager
+        try:
+            if p.risk and price > 0:
+                order_spec = p.risk.calculate_order(
+                    symbol=sym, side=sc.side, entry_price=sc.entry_price,
+                    stop_loss_price=sc.stop_loss,
+                    current_daily_loss=abs(p._today_pnl) if p._today_pnl < 0 else 0,
+                )
+                gate7_pass = order_spec.get("status") == "APPROVED"
+                sc.shares = order_spec.get("size", 0) if gate7_pass else 0
+                sc.gate_results.append(self._gate(
+                    "risk", "Gate 7: Risk Manager",
+                    gate7_pass,
+                    f"{'APPROVED' if gate7_pass else order_spec.get('reason', 'REJECTED')}"
+                    f" | {sc.shares} shares" if gate7_pass else "",
+                    value=sc.shares,
+                ))
+            else:
+                sc.shares = 10  # fallback
+                sc.gate_results.append(self._gate(
+                    "risk", "Gate 7: Risk Manager",
+                    True, "no risk manager, fallback 10 shares",
+                    value=10,
+                ))
+        except Exception as e:
+            sc.gate_results.append(self._gate(
+                "risk", "Gate 7: Risk Manager",
+                False, f"error: {e}",
+            ))
+
+        # ── GATE 19: LLM CIO
+        if self._is_skipped("gate19"):
+            sc.gate_results.append(self._gate(
+                "gate19", "Gate 19: LLM CIO",
+                True, "SKIPPED by --skip-gates",
+            ))
+            sc.cio_action = "SKIPPED"
+        else:
+            try:
+                ml_prediction = None
+                if sc.ml_score > 0:
+                    # Build minimal MLPrediction-like dict for gate19
+                    class _MockML:
+                        ml_score = sc.ml_score
+                        direction_prob = 0.5
+                        confidence = sc.ml_confidence
+                        top_features = []
+                    ml_prediction = _MockML()
+
+                # ── Fetch intraday context for LLM
+                intraday_ctx = {"vwap": 0, "day_high": 0, "day_low": 0, "prev_close": 0}
+                try:
+                    intraday_ctx = p._fetch_intraday_context(sym)
+                except Exception:
+                    pass
+
+                verdict = p.gate19.evaluate_trade(
+                    market_data={
+                        "symbol": sym, "price": price,
+                        "prev_close": intraday_ctx.get("prev_close", 0),
+                        "vwap": intraday_ctx.get("vwap", 0),
+                        "day_high": intraday_ctx.get("day_high", 0),
+                        "day_low": intraday_ctx.get("day_low", 0),
+                        "atr_15m": sc.atr_15m,
+                        "vix": sentiment.get("vix", 20),
+                        "spy_trend": "up" if sentiment.get("sentiment_score", 0.5) > 0.5 else "down",
+                        "session": session_str if 'session_str' in dir() else "MARKET",
+                        "timeframe": p.cfg.TIMEFRAME,
+                    },
+                    ml_signal={
+                        "ml_score": int(sc.ml_score) if sc.ml_score else int(sc.regime_score),
+                        "direction_prob": ml_prediction.direction_prob if ml_prediction else 0.5,
+                        "confidence": ml_prediction.confidence if ml_prediction else 0.5,
+                        "signal": sc.side.upper(),
+                        "top_features": [],
+                    },
+                    risk_data={
+                        "shares": sc.shares, "entry": sc.entry_price,
+                        "stop_loss": sc.stop_loss, "take_profit": sc.take_profit,
+                        "risk_usd": 0,
+                        "daily_pnl": p._today_pnl,
+                        "daily_loss_limit": p.cfg.MAX_DAILY_LOSS_USD,
+                        "trades_today": p._daily_order_count,
+                        "consecutive_losses": 0,
+                    },
+                    config_rules={
+                        "firm_name": p.cfg.FIRM_NAME,
+                        "max_daily_loss": p.cfg.MAX_DAILY_LOSS_USD,
+                        "max_orders_per_day": p.cfg.MAX_ORDERS_PER_DAY,
+                        "streak_block": p.cfg.STREAK_BLOCK,
+                        "consistency_rule": p.cfg.CONSISTENCY_RULE_PCT,
+                    },
+                    news_context=f"{candidate.catalyst_type}: {candidate.headline[:120]}",
+                )
+                sc.cio_action = verdict.action
+                sc.cio_reasoning = verdict.reasoning
+                sc.cio_reasoning_th = verdict.reasoning_th
+                sc.cio_reasoning_en = verdict.reasoning_en
+                sc.cio_multiplier = verdict.sizing_multiplier
+                sc.cio_support = verdict.support
+                sc.cio_resistance = verdict.resistance
+                sc.cio_cutloss = verdict.cutloss
+                sc.cio_rec_shares = verdict.recommended_shares
+                sc.cio_rec_entry = verdict.recommended_entry
+                sc.cio_rec_tp = verdict.recommended_tp
+                sc.cio_exp_period = verdict.expected_period
+                gate19_pass = verdict.is_go()
+
+                # Build detail string with levels
+                levels = verdict.levels_summary
+                detail = (
+                    f"{verdict.action} (mult={verdict.sizing_multiplier:.1f}) "
+                    f"| {verdict.provider} {verdict.latency_ms}ms"
+                )
+                if levels:
+                    detail += f" | {levels}"
+
+                sc.gate_results.append(self._gate(
+                    "gate19", "Gate 19: LLM CIO",
+                    gate19_pass, detail,
+                    value=verdict.sizing_multiplier,
+                ))
+            except Exception as e:
+                sc.gate_results.append(self._gate(
+                    "gate19", "Gate 19: LLM CIO",
+                    False, f"error: {e}",
+                ))
+                sc.cio_action = "ERROR"
+
+        # ── Add to report
+        self.report.candidates.append(sc)
+        return sc
+
+    # ------------------------------------------
+    # OUTPUT: Console
+    # ------------------------------------------
+
+    def print_candidate(self, sc: ShadowCandidate):
+        """พิมพ์ผล gate ของ candidate 1 ตัว"""
+        icon = "🟢" if sc.would_trade else "🔴"
+        print(f"\n{'─'*60}")
+        print(f"📰 {sc.symbol} | {sc.catalyst_type} | urgency={sc.urgency} | {sc.source}")
+        print(f"   {sc.headline[:80]}")
+
+        for g in sc.gate_results:
+            status = g.icon
+            name   = f"{g.gate_name:<25}"
+            detail = g.detail
+            print(f"  ├─ {status} {name} {detail}")
+
+        # ── CIO Analysis (bilingual + levels)
+        if sc.cio_action and sc.cio_action not in ("", "SKIPPED", "ERROR"):
+            print(f"  │")
+            print(f"  │  🤖 CIO Analysis:")
+            if sc.cio_reasoning_th:
+                print(f"  │  TH: {sc.cio_reasoning_th[:120]}")
+            if sc.cio_reasoning_en:
+                print(f"  │  EN: {sc.cio_reasoning_en[:120]}")
+            if sc.cio_support > 0 or sc.cio_resistance > 0:
+                print(f"  │  📊 Support=${sc.cio_support:.2f}  Resistance=${sc.cio_resistance:.2f}  "
+                      f"Cutloss=${sc.cio_cutloss:.2f}")
+            if sc.cio_rec_entry > 0 or sc.cio_rec_tp > 0:
+                print(f"  │  🎯 Entry=${sc.cio_rec_entry:.2f}  TP=${sc.cio_rec_tp:.2f}  "
+                      f"Period={sc.cio_exp_period or 'N/A'}")
+            if sc.cio_rec_shares > 0:
+                print(f"  │  📐 Recommended shares: {sc.cio_rec_shares}")
+
+        if sc.would_trade:
+            shares_display = sc.cio_rec_shares if sc.cio_rec_shares > 0 else sc.shares
+            if sc.cio_multiplier > 0 and sc.cio_multiplier < 1.0 and sc.cio_rec_shares <= 0:
+                shares_display = max(1, int(sc.shares * sc.cio_multiplier))
+            entry_display = sc.cio_rec_entry if sc.cio_rec_entry > 0 else sc.entry_price
+            tp_display    = sc.cio_rec_tp if sc.cio_rec_tp > 0 else sc.take_profit
+            sl_display    = sc.cio_cutloss if sc.cio_cutloss > 0 else sc.stop_loss
+            period_str    = f"  [{sc.cio_exp_period}]" if sc.cio_exp_period else ""
+            print(
+                f"  └─ {icon} WOULD TRADE: {sc.side.upper()} "
+                f"{shares_display}x {sc.symbol} @ ${entry_display:.2f} "
+                f"→ TP ${tp_display:.2f} SL ${sl_display:.2f}{period_str}"
+            )
+        else:
+            print(
+                f"  └─ {icon} BLOCKED ({sc.gates_failed} gate(s) failed: "
+                f"{', '.join(sc.blocking_gates)})"
+            )
+
+    def print_summary(self):
+        """พิมพ์สรุปทั้ง session"""
+        r = self.report
+        freq = r._gate_block_frequency()
+
+        print(f"\n{'═'*60}")
+        print(f"  👁️  SHADOW REPORT — {r.profile}")
+        print(f"  {r.started_at} → {r.ended_at}")
+        if r.skip_gates:
+            print(f"  Skipped gates: {', '.join(r.skip_gates)}")
+        print(f"{'═'*60}")
+        print(f"  Candidates: {r.total}  |  Would-Trade: {r.would_trade_count}  |  Blocked: {r.blocked_count}")
+
+        if freq:
+            print(f"\n  Gate Block Frequency:")
+            for gate_id, count in freq.items():
+                bar = "█" * count
+                print(f"    {gate_id:<15} {bar} ({count})")
+
+        # Would-trade summary
+        traders = [c for c in r.candidates if c.would_trade]
+        if traders:
+            print(f"\n  Would-Trade Setups:")
+            for c in traders:
+                shares = c.shares
+                if c.cio_multiplier > 0 and c.cio_multiplier < 1.0:
+                    shares = max(1, int(c.shares * c.cio_multiplier))
+                print(
+                    f"    🟢 {c.side.upper()} {shares}x {c.symbol} "
+                    f"@ ${c.entry_price:.2f} → TP ${c.take_profit:.2f} SL ${c.stop_loss:.2f} "
+                    f"| regime={c.regime_score:.0f} ml={c.ml_score:.0f} "
+                    f"combined={c.combined_score:.0f}"
+                )
+
+        print(f"{'═'*60}\n")
+
+    # ------------------------------------------
+    # OUTPUT: JSON
+    # ------------------------------------------
+
+    def save_json(self, output_dir: str = "./shadow_reports") -> str:
+        """บันทึก report เป็น JSON file"""
+        os.makedirs(output_dir, exist_ok=True)
+        ts = datetime.now(_TZ_ET).strftime("%Y-%m-%d_%H%M%S")
+        filename = f"shadow_{ts}.json"
+        filepath = os.path.join(output_dir, filename)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(self.report.to_dict(), f, indent=2, ensure_ascii=False)
+
+        logger.info(f"📁 Shadow report saved: {filepath}")
+        return filepath
+
+    # ------------------------------------------
+    # FINALIZE
+    # ------------------------------------------
+
+    def finalize(self):
+        """เรียกเมื่อจบ session → print summary + save JSON"""
+        self.report.ended_at = datetime.now(_TZ_ET).isoformat()
+        self.print_summary()
+        path = self.save_json()
+        return path
+
+
+# ============================================================
+# WATCHLIST LOADER — รองรับหลาย format
+# ============================================================
+
+def load_watchlist_file(filepath: str) -> list:
+    """
+    โหลด watchlist จากไฟล์ — รองรับ 4 format:
+
+    1. universe.json (ระบบ generate)
+       {"symbols": ["NVDA", "TSLA", ...], "symbol_data": {...}}
+       → ดึงจาก key "symbols"
+
+    2. JSON array
+       ["NVDA", "TSLA", "META"]
+       → ใช้ตรงๆ
+
+    3. Text file (.txt) — 1 symbol ต่อบรรทัด
+       NVDA
+       TSLA
+       META
+
+    4. CSV file (.csv) — คอลัมน์ชื่อ symbol, ticker, Symbol, Ticker, หรือคอลัมน์แรก
+       symbol,name
+       NVDA,NVIDIA
+       TSLA,Tesla
+
+    Returns:
+        list[str] — symbols (uppercase, deduplicated, ordered)
+
+    Raises:
+        FileNotFoundError: ถ้าไฟล์ไม่มี
+        ValueError: ถ้า parse ไม่ได้
+    """
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"Watchlist file not found: {filepath}")
+
+    ext = path.suffix.lower()
+    symbols = []
+
+    # ── JSON (.json)
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            # Format 2: plain JSON array ["NVDA", "TSLA"]
+            symbols = [str(s).strip().upper() for s in data if str(s).strip()]
+            logger.info(f"📋 Loaded JSON array: {len(symbols)} symbols from {path.name}")
+
+        elif isinstance(data, dict):
+            # Format 1: universe.json → {"symbols": [...]}
+            if "symbols" in data:
+                symbols = [str(s).strip().upper() for s in data["symbols"] if str(s).strip()]
+                tag = data.get("tag", "")
+                stats = data.get("stats", {})
+                logger.info(
+                    f"📋 Loaded universe.json: {len(symbols)} symbols "
+                    f"(tag={tag}, final={stats.get('final', '?')})"
+                )
+            else:
+                # อาจเป็น dict ที่ key = symbol เช่น {"NVDA": {...}, "TSLA": {...}}
+                symbols = [str(k).strip().upper() for k in data.keys()
+                           if str(k).strip() and not k.startswith("_")]
+                logger.info(f"📋 Loaded JSON dict keys: {len(symbols)} symbols from {path.name}")
+
+        if not symbols:
+            raise ValueError(f"Could not parse symbols from JSON: {filepath}")
+
+    # ── CSV (.csv)
+    elif ext == ".csv":
+        import csv
+        with open(path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames:
+                # หา column ที่น่าจะเป็น symbol
+                sym_col = None
+                for candidate_col in ["symbol", "Symbol", "SYMBOL",
+                                       "ticker", "Ticker", "TICKER",
+                                       "sym", "Sym", "SYM",
+                                       "code", "Code", "CODE"]:
+                    if candidate_col in reader.fieldnames:
+                        sym_col = candidate_col
+                        break
+
+                if sym_col is None:
+                    # ใช้คอลัมน์แรก
+                    sym_col = reader.fieldnames[0]
+                    logger.info(f"📋 CSV: no 'symbol'/'ticker' column found, using first column: '{sym_col}'")
+
+                for row in reader:
+                    val = row.get(sym_col, "").strip().upper()
+                    if val and val.isalpha():
+                        symbols.append(val)
+
+        if not symbols:
+            # Fallback: ลองอ่านแบบไม่มี header (1 column = symbols)
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    val = line.strip().upper()
+                    if val and val.isalpha() and len(val) <= 6:
+                        symbols.append(val)
+
+        logger.info(f"📋 Loaded CSV: {len(symbols)} symbols from {path.name}")
+
+    # ── Text file (.txt หรืออื่นๆ)
+    else:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                # รองรับทั้ง "NVDA" และ "NVDA # comment" และ "NVDA,TSLA" (comma-separated)
+                line = line.split("#")[0].strip()  # ตัด comment
+                if not line:
+                    continue
+                if "," in line:
+                    # comma-separated ในบรรทัดเดียว
+                    for part in line.split(","):
+                        val = part.strip().upper()
+                        if val and len(val) <= 6:
+                            symbols.append(val)
+                else:
+                    val = line.upper()
+                    if val and len(val) <= 6:
+                        symbols.append(val)
+
+        logger.info(f"📋 Loaded text file: {len(symbols)} symbols from {path.name}")
+
+    # ── Deduplicate (preserve order)
+    seen = set()
+    deduped = []
+    for s in symbols:
+        if s not in seen:
+            seen.add(s)
+            deduped.append(s)
+
+    if not deduped:
+        raise ValueError(f"No valid symbols found in: {filepath}")
+
+    return deduped
+
+
+# ============================================================
+# SYMBOL RESOLVER — รวม sources ทั้งหมด
+# ============================================================
+
+def resolve_symbols(
+    pipeline,
+    shadow_symbols: list = None,
+    watchlist_file: str  = None,
+) -> list:
+    """
+    รวม symbols จากทุก source ตามลำดับ priority:
+
+    Priority:
+      1. --shadow-watchlist file  (ถ้าให้มา → ใช้เป็นหลัก)
+      2. --shadow-symbols CLI     (เพิ่มเข้าไปด้วย ถ้าให้มา)
+      3. ML_WATCHLIST + Tiered    (fallback ถ้าไม่ได้ให้อะไรเลย)
+      4. Default hardcoded        (fallback สุดท้าย)
+
+    Returns:
+        list[str] — deduplicated symbols
+    """
+    symbols = []
+
+    # ── Source 1: Watchlist file
+    if watchlist_file:
+        try:
+            file_symbols = load_watchlist_file(watchlist_file)
+            symbols.extend(file_symbols)
+        except Exception as e:
+            logger.error(f"Failed to load watchlist file: {e}")
+
+    # ── Source 2: CLI --shadow-symbols
+    if shadow_symbols:
+        for s in shadow_symbols:
+            if s not in symbols:
+                symbols.append(s)
+
+    # ── Source 3: Config + Tiered (only if no explicit source given)
+    if not symbols:
+        symbols = list(pipeline.cfg.ML_WATCHLIST)
+        if pipeline._tiers:
+            for s in (pipeline._tiers.tier1_hot + pipeline._tiers.tier2_warm):
+                if s not in symbols:
+                    symbols.append(s)
+
+    # ── Source 4: Hardcoded fallback
+    if not symbols:
+        symbols = ["NVDA", "TSLA", "META", "AAPL", "AMZN"]
+
+    return symbols
+
+
+# ============================================================
+# RUN FUNCTIONS (called from main.py)
+# ============================================================
+
+def run_shadow_oneshot(pipeline, skip_gates: set,
+                       shadow_symbols: list = None,
+                       watchlist_file: str = None):
+    """
+    One-Shot Shadow: สร้าง candidates จาก watchlist → รัน pipeline → แสดงผล
+
+    Symbol resolution (priority):
+      1. --shadow-watchlist file
+      2. --shadow-symbols CLI
+      3. ML_WATCHLIST + tiered scan
+      4. Default ["NVDA", "TSLA", "META", "AAPL", "AMZN"]
+    """
+    from ext_data.news_scanner import NewsCandidate
+
+    # ── Resolve symbols
+    symbols = resolve_symbols(pipeline, shadow_symbols, watchlist_file)
+
+    runner = ShadowRunner(pipeline, skip_gates=skip_gates,
+                          shadow_symbols=symbols, is_live=False)
+
+    logger.info(f"Shadow scanning {len(symbols)} symbols: "
+                f"{symbols[:15]}{'...' if len(symbols) > 15 else ''}")
+
+    # ── Pre-market scan (optional, non-blocking)
+    try:
+        pipeline.startup_scan_and_train()
+    except Exception as e:
+        logger.warning(f"Pre-market scan failed (non-critical): {e}")
+
+    # ── Generate candidates — ใช้ NewsScanner ถ้ามี, fallback เป็น mock
+    candidates = _fetch_real_candidates(pipeline, symbols)
+
+    if not candidates:
+        logger.info("No real candidates found → generating analysis candidates from watchlist")
+        candidates = [
+            NewsCandidate(
+                symbol=sym,
+                headline=f"[SHADOW] Analysis scan for {sym}",
+                catalyst_type="OTHER",
+                urgency_score=50,
+                source="SHADOW_SCAN",
+            )
+            for sym in symbols
+        ]
+
+    # ── Process each candidate
+    for candidate in candidates:
+        sc = runner.process_candidate(candidate)
+        runner.print_candidate(sc)
+
+    # ── Finalize
+    runner.finalize()
+
+
+def run_shadow_live(pipeline, skip_gates: set,
+                    shadow_symbols: list = None,
+                    watchlist_file: str = None):
+    """
+    Live Shadow: วิ่งคู่ตลาดจริง รอข่าวเข้ามา → วิเคราะห์ → แสดงผล (ไม่สั่ง order)
+
+    ถ้าให้ watchlist_file → filter เฉพาะ symbols ที่อยู่ใน file
+    """
+    import signal as sig
+    from ext_data.news_scanner import NewsScanner, NewsCandidate
+
+    # ── Resolve symbols (ใช้เป็น filter)
+    filter_symbols = resolve_symbols(pipeline, shadow_symbols, watchlist_file)
+
+    runner = ShadowRunner(pipeline, skip_gates=skip_gates,
+                          shadow_symbols=filter_symbols, is_live=True)
+
+    stop_event = threading.Event()
+
+    # ── Pre-market scan
+    try:
+        pipeline.startup_scan_and_train()
+    except Exception as e:
+        logger.warning(f"Pre-market scan failed: {e}")
+
+    # ── Callback: เมื่อ NewsScanner พบข่าว
+    def on_news(c: NewsCandidate):
+        if filter_symbols and c.symbol not in filter_symbols:
+            return  # filter symbols
+        try:
+            sc = runner.process_candidate(c)
+            runner.print_candidate(sc)
+        except Exception as e:
+            logger.error(f"Shadow process error: {e}", exc_info=True)
+
+    # ── Start news scanner
+    scanner = NewsScanner(
+        benzinga_api_key=pipeline.cfg.BENZINGA_API_KEY or None,
+        use_sec_edgar=True,
+        min_urgency=pipeline.cfg.MIN_URGENCY,
+        callback=on_news,
+    )
+    scanner.start()
+
+    logger.info(
+        f"👁️  LIVE SHADOW — listening for news... "
+        f"(filter: {len(filter_symbols)} symbols, Ctrl+C to stop)"
+    )
+
+    # ── Graceful shutdown
+    def handler(s, frame):
+        logger.info("🛑 Shadow shutdown")
+        stop_event.set()
+
+    sig.signal(sig.SIGINT, handler)
+    sig.signal(sig.SIGTERM, handler)
+
+    try:
+        while not stop_event.is_set():
+            stop_event.wait(60)
+    finally:
+        scanner.stop()
+        runner.finalize()
+
+
+# ============================================================
+# HELPER: Fetch real candidates
+# ============================================================
+
+def _fetch_real_candidates(pipeline, symbols: list) -> list:
+    """
+    ดึง candidates จริงจาก SEC EDGAR / Benzinga สำหรับ symbols ที่กำหนด
+    ใช้ใน one-shot mode เพื่อให้ได้ข่าวจริง (ถ้ามี)
+    """
+    candidates = []
+    try:
+        from ext_data.news_scanner import NewsScanner, NewsCandidate
+        scanner = NewsScanner(
+            benzinga_api_key=pipeline.cfg.BENZINGA_API_KEY or None,
+            use_sec_edgar=True,
+            min_urgency=30,  # ลด threshold เพื่อเก็บข่าวมากขึ้นใน shadow mode
+        )
+        # Quick poll (ไม่เปิด background thread)
+        raw = scanner._poll_all_sources()
+        if raw:
+            for c in raw:
+                if c.symbol in symbols:
+                    candidates.append(c)
+    except Exception as e:
+        logger.debug(f"Real candidate fetch failed: {e}")
+
+    return candidates

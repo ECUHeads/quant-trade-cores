@@ -63,7 +63,7 @@ class TechScanConfig:
 
     # ── Active rules (comma-separated string or set)
     active_rules: set = field(default_factory=lambda: {
-        "vwap_pullback", "ml_breakout", "volume_spike",
+        "vwap_pullback", "ml_breakout", "volume_spike", "rsi_divergence",
     })
 
     # ── VWAP Pullback params
@@ -78,6 +78,12 @@ class TechScanConfig:
     # ── Volume Spike params
     vol_spike_rvol:      float = 2.0    # RVOL multiplier
     vol_spike_price_pct: float = 1.5    # min % price move in last 2 bars
+
+    # ── RSI Divergence params
+    div_swing_order:     int   = 5      # bars ซ้าย-ขวาสำหรับ swing detection
+    div_lookback_bars:   int   = 30     # ดูย้อนหลังกี่ bars
+    div_min_confidence:  float = 0.3    # confidence ขั้นต่ำ
+    div_rvol_min:        float = 1.0    # RVOL ขั้นต่ำ
 
     # ── Scan scope
     scan_tier1_only:     bool  = False  # True = scan เฉพาะ Tier 1 (faster)
@@ -141,7 +147,7 @@ class TechnicalScanner:
             pipeline.process_news(sig.to_news_candidate())
     """
 
-    ALL_RULES = {"vwap_pullback", "ml_breakout", "volume_spike"}
+    ALL_RULES = {"vwap_pullback", "ml_breakout", "volume_spike", "rsi_divergence"}
 
     def __init__(self, config: TechScanConfig = None):
         self.config = config or TechScanConfig()
@@ -259,6 +265,11 @@ class TechnicalScanner:
                 signals.append(sig)
 
         # ── Rule 3: Volume Spike
+        if "rsi_divergence" in self.config.active_rules:
+            sig = self._check_rsi_divergence(symbol, df, price, ind)
+            if sig:
+                signals.append(sig)
+
         if "volume_spike" in self.config.active_rules:
             sig = self._check_volume_spike(symbol, df, price, indicators)
             if sig:
@@ -539,3 +550,121 @@ class TechnicalScanner:
             "active_cooldowns": sum(1 for s, t in self._cooldowns.items()
                                     if time.time() - t < self.config.cooldown_sec),
         }
+
+    # ------------------------------------------
+    # RULE 4: RSI DIVERGENCE
+    # ------------------------------------------
+
+    def _check_rsi_divergence(self, symbol, df, price, ind) -> Optional[TechSignal]:
+        """
+        RSI Divergence: จับ Hidden + Regular Divergence
+
+        ตามคำแนะนำมืออาชีพ:
+          "สิ่งที่พวกเขาหาคือ Divergence โดยเฉพาะ Hidden Divergence
+           เพื่อหาจังหวะเข้าทำกำไรในจังหวะย่อตัว (Pullback)"
+
+        Hidden Bullish:  Price HL + RSI LL → Pullback in uptrend → LONG
+        Hidden Bearish:  Price LH + RSI HH → Pullback in downtrend → SHORT
+        Regular Bullish: Price LL + RSI HL → Weakening downtrend
+        Regular Bearish: Price HH + RSI LH → Weakening uptrend
+        """
+        if len(df) < 30:
+            return None
+
+        cfg = self.config
+        if ind.get("rvol", 0) < getattr(cfg, "div_rvol_min", 1.0):
+            return None
+
+        c = df["close"].astype(float)
+        lookback = getattr(cfg, "div_lookback_bars", 30)
+        swing_order = getattr(cfg, "div_swing_order", 5)
+        min_conf = getattr(cfg, "div_min_confidence", 0.3)
+
+        # Calculate RSI
+        delta = c.diff()
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rsi = 100 - (100 / (1 + (gain / (loss.replace(0, np.nan)))))
+        rsi = rsi.fillna(50)
+
+        # Find swing points
+        price_window = c.iloc[-lookback:].reset_index(drop=True)
+        rsi_window = rsi.iloc[-lookback:].reset_index(drop=True)
+
+        def _find_swings(series, order=5):
+            vals = series.values
+            n = len(vals)
+            swings = []
+            for i in range(order, n - order):
+                is_hi = all(vals[i] > vals[i-j] and vals[i] > vals[i+j] for j in range(1, order+1))
+                is_lo = all(vals[i] < vals[i-j] and vals[i] < vals[i+j] for j in range(1, order+1))
+                if is_hi: swings.append((i, float(vals[i]), "high"))
+                elif is_lo: swings.append((i, float(vals[i]), "low"))
+            return swings[-10:]
+
+        price_swings = _find_swings(price_window, swing_order)
+        rsi_swings = _find_swings(rsi_window, swing_order)
+
+        p_lows = [(i,v) for i,v,t in price_swings if t == "low"]
+        p_highs = [(i,v) for i,v,t in price_swings if t == "high"]
+        r_lows = [(i,v) for i,v,t in rsi_swings if t == "low"]
+        r_highs = [(i,v) for i,v,t in rsi_swings if t == "high"]
+
+        best = {"type": None, "conf": 0.0, "desc": ""}
+
+        # Hidden Bullish: Price HL + RSI LL
+        if len(p_lows) >= 2 and len(r_lows) >= 2:
+            pl1, pl2 = p_lows[-2], p_lows[-1]
+            rl1, rl2 = r_lows[-2], r_lows[-1]
+            if pl2[0]-pl1[0] >= 5 and pl2[1] > pl1[1] and rl2[1] < rl1[1]:
+                conf = min(1.0, abs(pl2[1]-pl1[1])/(pl1[1]+1e-9)*100*0.3 + abs(rl2[1]-rl1[1])*0.02)
+                if conf > best["conf"]:
+                    best = {"type": "hidden_bullish", "conf": conf,
+                            "desc": f"Hidden Bull: Price HL→{pl2[1]:.0f} + RSI LL→{rl2[1]:.0f}"}
+
+        # Hidden Bearish: Price LH + RSI HH
+        if len(p_highs) >= 2 and len(r_highs) >= 2:
+            ph1, ph2 = p_highs[-2], p_highs[-1]
+            rh1, rh2 = r_highs[-2], r_highs[-1]
+            if ph2[0]-ph1[0] >= 5 and ph2[1] < ph1[1] and rh2[1] > rh1[1]:
+                conf = min(1.0, abs(ph2[1]-ph1[1])/(ph1[1]+1e-9)*100*0.3 + abs(rh2[1]-rh1[1])*0.02)
+                if conf > best["conf"]:
+                    best = {"type": "hidden_bearish", "conf": conf,
+                            "desc": f"Hidden Bear: Price LH→{ph2[1]:.0f} + RSI HH→{rh2[1]:.0f}"}
+
+        # Regular Bullish: Price LL + RSI HL
+        if len(p_lows) >= 2 and len(r_lows) >= 2 and best["conf"] < 0.3:
+            pl1, pl2 = p_lows[-2], p_lows[-1]
+            rl1, rl2 = r_lows[-2], r_lows[-1]
+            if pl2[0]-pl1[0] >= 5 and pl2[1] < pl1[1] and rl2[1] > rl1[1]:
+                conf = min(0.8, abs(pl2[1]-pl1[1])/(pl1[1]+1e-9)*100*0.2 + abs(rl2[1]-rl1[1])*0.015)
+                if conf > best["conf"]:
+                    best = {"type": "regular_bullish", "conf": conf,
+                            "desc": f"Reg Bull: Price LL→{pl2[1]:.0f} + RSI HL→{rl2[1]:.0f}"}
+
+        # Regular Bearish: Price HH + RSI LH
+        if len(p_highs) >= 2 and len(r_highs) >= 2 and best["conf"] < 0.3:
+            ph1, ph2 = p_highs[-2], p_highs[-1]
+            rh1, rh2 = r_highs[-2], r_highs[-1]
+            if ph2[0]-ph1[0] >= 5 and ph2[1] > ph1[1] and rh2[1] < rh1[1]:
+                conf = min(0.8, abs(ph2[1]-ph1[1])/(ph1[1]+1e-9)*100*0.2 + abs(rh2[1]-rh1[1])*0.015)
+                if conf > best["conf"]:
+                    best = {"type": "regular_bearish", "conf": conf,
+                            "desc": f"Reg Bear: Price HH→{ph2[1]:.0f} + RSI LH→{rh2[1]:.0f}"}
+
+        if best["type"] is None or best["conf"] < min_conf:
+            return None
+
+        side = "buy" if "bullish" in best["type"] else "sell"
+        base_urg = 65 if "hidden" in best["type"] else 55
+        urgency = min(90, base_urg + int(best["conf"] * 25))
+
+        return TechSignal(
+            symbol=symbol,
+            rule_name="RSI_DIVERGENCE",
+            side=side,
+            urgency=urgency,
+            detail=f"{best['desc']} | RVOL={ind.get('rvol',0):.1f}x conf={best['conf']:.2f}",
+            metrics={"divergence_type": best["type"], "confidence": best["conf"],
+                     "rsi_current": float(rsi.iloc[-1]), "rvol": ind.get("rvol", 0)},
+        )

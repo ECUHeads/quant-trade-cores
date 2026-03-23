@@ -2395,20 +2395,23 @@ def run_shadow_live(pipeline, skip_gates: set,
 # HELPER: Fetch real candidates
 # ============================================================
 
-def _fetch_real_candidates(pipeline, symbols: list) -> list:
+def _fetch_real_candidates(pipeline, symbols: list, lookback_days: int = 2) -> list:
     """
     ดึง candidates จริงจาก SEC EDGAR / Benzinga สำหรับ symbols ที่กำหนด
     ใช้ใน one-shot mode เพื่อให้ได้ข่าวจริง (ถ้ามี)
+
+    Enhanced: เพิ่ม EFTS historical search สำหรับ dry-run/shadow
     """
     candidates = []
+
+    # ── Real-time candidates (RSS + Benzinga)
     try:
         from ext_data.news_scanner import NewsScanner, NewsCandidate
         scanner = NewsScanner(
             benzinga_api_key=pipeline.cfg.BENZINGA_API_KEY or None,
             use_sec_edgar=True,
-            min_urgency=30,  # ลด threshold เพื่อเก็บข่าวมากขึ้นใน shadow mode
+            min_urgency=30,
         )
-        # Quick poll (ไม่เปิด background thread)
         raw = scanner._poll_all_sources()
         if raw:
             for c in raw:
@@ -2416,5 +2419,25 @@ def _fetch_real_candidates(pipeline, symbols: list) -> list:
                     candidates.append(c)
     except Exception as e:
         logger.debug(f"Real candidate fetch failed: {e}")
+
+    # ── Historical candidates (EFTS) — ดึง filings ย้อนหลัง 1-2 วัน
+    try:
+        from ext_data.news_scanner import SecEdgarFullTextSearch
+        efts = SecEdgarFullTextSearch()
+        historical = efts.fetch_historical(
+            lookback_days=lookback_days,
+            watchlist=symbols,
+            max_results=50,
+        )
+        # Dedup by (symbol, headline[:50])
+        seen = set((c.symbol, c.headline[:50]) for c in candidates)
+        for c in historical:
+            key = (c.symbol, c.headline[:50])
+            if key not in seen:
+                candidates.append(c)
+                seen.add(key)
+        logger.info(f"[Shadow] EFTS: +{len(historical)} historical ({lookback_days}d)")
+    except Exception as e:
+        logger.debug(f"EFTS historical fetch failed: {e}")
 
     return candidates

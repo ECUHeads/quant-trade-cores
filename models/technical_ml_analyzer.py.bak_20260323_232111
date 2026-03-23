@@ -246,92 +246,6 @@ class FeatureEngineer:
 
         return feat_df.ffill().fillna(0)
 
-
-    # ── Volume Profile Features (POC, Value Area)
-    def _volume_profile_features(self, df1: pd.DataFrame) -> dict:
-        """
-        Volume Profile: POC, Value Area High/Low
-        
-        ตามคำแนะนำ Day Trading มืออาชีพ:
-          "Volume Profile บอกว่าช่วงราคาไหนมีการซื้อขายหนาแน่นที่สุด (POC)
-           มือโปรใช้หาแนวรับ-แนวต้านที่มีนัยสำคัญจริงๆ"
-        """
-        c = df1["close"].astype(float)
-        h = df1["high"].astype(float)
-        l = df1["low"].astype(float)
-        v = df1["volume"].astype(float)
-        current_price = c.iloc[-1]
-
-        lookback = min(60, len(df1) - 1)
-        profile_df = df1.iloc[max(0, len(df1) - lookback - 1):len(df1) - 1]
-
-        if len(profile_df) < 10:
-            return {"dist_from_poc": 0.0, "price_in_value_area": 0.5,
-                    "va_width_pct": 0.0, "dist_from_vah": 0.0, "dist_from_val": 0.0}
-
-        # Build volume profile (40 bins)
-        price_low = profile_df["low"].astype(float).min()
-        price_high = profile_df["high"].astype(float).max()
-        if price_high <= price_low:
-            return {"dist_from_poc": 0.0, "price_in_value_area": 0.5,
-                    "va_width_pct": 0.0, "dist_from_vah": 0.0, "dist_from_val": 0.0}
-
-        n_bins = 40
-        bin_edges = np.linspace(price_low, price_high, n_bins + 1)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        bin_volumes = np.zeros(n_bins)
-
-        ph = profile_df["high"].astype(float).values
-        pl = profile_df["low"].astype(float).values
-        pv = profile_df["volume"].astype(float).values
-
-        for i in range(len(profile_df)):
-            if pv[i] <= 0 or ph[i] <= pl[i]:
-                continue
-            low_idx = max(0, np.searchsorted(bin_edges, pl[i], side="right") - 1)
-            high_idx = min(n_bins, np.searchsorted(bin_edges, ph[i], side="left"))
-            if high_idx <= low_idx:
-                high_idx = low_idx + 1
-            n_covered = high_idx - low_idx
-            if n_covered > 0:
-                bin_volumes[low_idx:high_idx] += pv[i] / n_covered
-
-        poc = float(bin_centers[np.argmax(bin_volumes)])
-
-        # Value Area (70% of total volume)
-        total_vol = bin_volumes.sum()
-        if total_vol <= 0:
-            return {"dist_from_poc": 0.0, "price_in_value_area": 0.5,
-                    "va_width_pct": 0.0, "dist_from_vah": 0.0, "dist_from_val": 0.0}
-
-        poc_idx = int(np.argmax(bin_volumes))
-        accumulated = bin_volumes[poc_idx]
-        va_lo, va_hi = poc_idx, poc_idx
-        while accumulated < total_vol * 0.70:
-            lo_vol = bin_volumes[va_lo - 1] if va_lo > 0 else 0
-            hi_vol = bin_volumes[va_hi + 1] if va_hi < n_bins - 1 else 0
-            if lo_vol == 0 and hi_vol == 0:
-                break
-            if lo_vol >= hi_vol and va_lo > 0:
-                va_lo -= 1
-                accumulated += bin_volumes[va_lo]
-            elif va_hi < n_bins - 1:
-                va_hi += 1
-                accumulated += bin_volumes[va_hi]
-            else:
-                break
-
-        val = float(bin_edges[va_lo])
-        vah = float(bin_edges[va_hi + 1])
-
-        return {
-            "dist_from_poc": round(float((current_price - poc) / (poc + 1e-9) * 100), 4),
-            "price_in_value_area": 1.0 if val <= current_price <= vah else 0.0,
-            "va_width_pct": round(float((vah - val) / (poc + 1e-9) * 100), 4),
-            "dist_from_vah": round(float((current_price - vah) / (vah + 1e-9) * 100), 4),
-            "dist_from_val": round(float((current_price - val) / (val + 1e-9) * 100), 4),
-        }
-
     # ── 4. FEATURE SCALING (Crucial for LSTM)
     def scale_features(self, df: pd.DataFrame, method='standard') -> pd.DataFrame:
         """
@@ -886,7 +800,6 @@ class FeatureEngineer:
         feats.update(self._price_features(df1, df5))
         feats.update(self._momentum_features(df1))
         feats.update(self._volatility_features(df1))
-        feats.update(self._volume_profile_features(df1))  # VVP: POC, Value Area
         feats.update(self._volume_features(df1))
         feats.update(self._candle_features(df1))
         feats.update(self._mtf_features(df1, df5))
