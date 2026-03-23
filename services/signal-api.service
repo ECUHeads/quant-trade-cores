@@ -1,0 +1,31 @@
+# deploy/signal-api.service
+[Unit]
+Description=Quant Agent - Signal Distribution API (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/opt/ttp-trading
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/ttp-trading/.env
+
+ExecStart=/opt/ttp-trading/venv/bin/python3 -m uvicorn platform.signal_api:app --host 0.0.0.0 --port 8000
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+MemoryMax=512M
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ttp-trading
+
+StandardOutput=append:/opt/ttp-trading/logs/api.log
+StandardError=append:/opt/ttp-trading/logs/api-error.log
+
+[Install]
+WantedBy=multi-user.target

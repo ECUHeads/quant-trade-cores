@@ -1,0 +1,1 @@
+trade_id,alpaca_order_id,symbol,side,catalyst_type,urgency_score,news_headline,news_source,regime_sentiment,vix_at_entry,spy_at_entry,market_session,planned_entry,actual_entry,shares,stop_price,target_price,momentum_score,mean_rev_score,final_score,actual_exit,exit_reason,commission_usd,entry_time,exit_time,pnl_usd,pnl_pct,rr_achieved,rr_planned,is_winner,slippage_usd,notes

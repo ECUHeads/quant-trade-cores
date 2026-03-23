@@ -1,0 +1,1194 @@
+{
+  "meta": {
+    "profile": "ALPACA_PAPER_100K",
+    "mode": "one-shot",
+    "started_at": "2026-03-22T07:52:21.031942-04:00",
+    "ended_at": "2026-03-22T07:53:38.987664-04:00",
+    "skip_gates": [
+      "gate19",
+      "session"
+    ]
+  },
+  "summary": {
+    "total_candidates": 8,
+    "would_trade": 0,
+    "blocked": 8,
+    "gate_block_freq": {
+      "sentiment": 8,
+      "ml": 8,
+      "universe": 5,
+      "regime": 4
+    }
+  },
+  "candidates": [
+    {
+      "symbol": "NVDA",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for NVDA",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032406+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 11,
+      "gates_failed": 3,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate 6: Regime",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$174.14",
+          "value": 174.14
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": true,
+          "skipped": false,
+          "detail": "price=$174.14, prev_close=$179.17",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.0, threshold=50",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180351.2s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 367 shares",
+          "value": 367
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 174.49,
+        "stop_loss": 173.48,
+        "take_profit": 176.51,
+        "shares": 367,
+        "atr_15m": 0.6725,
+        "regime_score": 0.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 0.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "TSLA",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for TSLA",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032411+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 12,
+      "gates_failed": 2,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$368.10",
+          "value": 368.1
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": true,
+          "skipped": false,
+          "detail": "price=$368.10, prev_close=$382.60",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": true,
+          "skipped": false,
+          "detail": "score=50.0, threshold=50",
+          "value": 50.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180360.9s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 159 shares",
+          "value": 159
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 368.84,
+        "stop_loss": 366.44,
+        "take_profit": 373.63,
+        "shares": 159,
+        "atr_15m": 1.5982,
+        "regime_score": 50.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 50.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "META",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for META",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032413+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 12,
+      "gates_failed": 2,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$594.01",
+          "value": 594.01
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": true,
+          "skipped": false,
+          "detail": "price=$594.01, prev_close=$608.36",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": true,
+          "skipped": false,
+          "detail": "score=100.0, threshold=50",
+          "value": 100.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180369.4s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 126 shares",
+          "value": 126
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 595.2,
+        "stop_loss": 592.45,
+        "take_profit": 600.69,
+        "shares": 126,
+        "atr_15m": 1.8304,
+        "regime_score": 100.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 100.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "AAPL",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for AAPL",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032413+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 11,
+      "gates_failed": 3,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate 5: Universe",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$248.98",
+          "value": 248.98
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": false,
+          "skipped": false,
+          "detail": "price=$248.98, prev_close=$249.84",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": true,
+          "skipped": false,
+          "detail": "score=50.0, threshold=50",
+          "value": 50.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180378.7s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 297 shares",
+          "value": 297
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 249.48,
+        "stop_loss": 248.3,
+        "take_profit": 251.85,
+        "shares": 297,
+        "atr_15m": 0.7889,
+        "regime_score": 50.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 50.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "AMZN",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for AMZN",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032414+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 10,
+      "gates_failed": 4,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate 5: Universe",
+        "Gate 6: Regime",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$205.31",
+          "value": 205.31
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": false,
+          "skipped": false,
+          "detail": "price=$205.31, prev_close=$209.04",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.0, threshold=50",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180388.0s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 354 shares",
+          "value": 354
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 205.72,
+        "stop_loss": 204.72,
+        "take_profit": 207.73,
+        "shares": 354,
+        "atr_15m": 0.6686,
+        "regime_score": 0.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 0.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "MRNA",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for MRNA",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032415+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 10,
+      "gates_failed": 4,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate 5: Universe",
+        "Gate 6: Regime",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$51.40",
+          "value": 51.4
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": false,
+          "skipped": false,
+          "detail": "price=$51.40, prev_close=$52.36",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.0, threshold=50",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180398.2s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 742 shares",
+          "value": 742
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 51.5,
+        "stop_loss": 50.93,
+        "take_profit": 52.64,
+        "shares": 742,
+        "atr_15m": 0.3807,
+        "regime_score": 0.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 0.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "NFLX",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for NFLX",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032416+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 11,
+      "gates_failed": 3,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate 5: Universe",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$92.06",
+          "value": 92.06
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": false,
+          "skipped": false,
+          "detail": "price=$92.06, prev_close=$92.01",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": true,
+          "skipped": false,
+          "detail": "score=50.0, threshold=50",
+          "value": 50.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180406.3s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 885 shares",
+          "value": 885
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 92.24,
+        "stop_loss": 91.86,
+        "take_profit": 93.01,
+        "shares": 885,
+        "atr_15m": 0.2554,
+        "regime_score": 50.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 50.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    },
+    {
+      "symbol": "AMD",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for AMD",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T11:52:21.032417+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 10,
+      "gates_failed": 4,
+      "gates_skipped": 2,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate 5: Universe",
+        "Gate 6: Regime",
+        "Gate ML: ML Analyzer"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$1800.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$201.36",
+          "value": 201.36
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": false,
+          "skipped": false,
+          "detail": "price=$201.36, prev_close=$204.95",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.0, threshold=50",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/10",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774180414.7s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=3",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 278 shares",
+          "value": 278
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 201.76,
+        "stop_loss": 200.37,
+        "take_profit": 204.53,
+        "shares": 278,
+        "atr_15m": 0.9236,
+        "regime_score": 0.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 0.0,
+        "cio_action": "SKIPPED",
+        "cio_reasoning": "",
+        "cio_multiplier": 0.0
+      }
+    }
+  ]
+}

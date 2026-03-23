@@ -1,0 +1,512 @@
+{
+  "generated_at": "2026-03-23T07:16:50.269764+00:00",
+  "tag": "23-03-2026",
+  "stats": {
+    "total_us_equity": 13411,
+    "after_metadata": 4890,
+    "after_adv_price": 82,
+    "final": 82
+  },
+  "criteria": {
+    "min_price": 5.0,
+    "min_adv_10d": 1000000,
+    "min_dollar_vol": 5000000.0,
+    "target_size": 300
+  },
+  "symbols": [
+    "SPY",
+    "NVDA",
+    "QQQ",
+    "LQD",
+    "IWM",
+    "AMZN",
+    "EFA",
+    "TLT",
+    "XLF",
+    "EMB",
+    "NFLX",
+    "EEM",
+    "XLV",
+    "VCIT",
+    "XLE",
+    "INTC",
+    "BAC",
+    "KRE",
+    "XLP",
+    "GDX",
+    "SOXL",
+    "TQQQ",
+    "IBIT",
+    "BITO",
+    "CSCO",
+    "USHY",
+    "SQQQ",
+    "T",
+    "XLU",
+    "EWZ",
+    "VZ",
+    "FXI",
+    "DVN",
+    "FCX",
+    "PFE",
+    "SLB",
+    "CMCSA",
+    "WBD",
+    "SOFI",
+    "PBR",
+    "HAL",
+    "CTRA",
+    "SPDN",
+    "SCHX",
+    "CMG",
+    "SPIB",
+    "CSX",
+    "CCL",
+    "DOW",
+    "VG",
+    "F",
+    "KWEB",
+    "CVE",
+    "ETHA",
+    "AAL",
+    "NU",
+    "VALE",
+    "HPE",
+    "PINS",
+    "NOK",
+    "HIMS",
+    "SMCI",
+    "TSLG",
+    "NCLH",
+    "CDE",
+    "KHC",
+    "OWL",
+    "PATH",
+    "HBAN",
+    "RKT",
+    "CPNG",
+    "RIVN",
+    "KVUE",
+    "PCG",
+    "QYLD",
+    "WULF",
+    "ITUB",
+    "NIO",
+    "RIG",
+    "MARA",
+    "AGNC",
+    "STLA"
+  ],
+  "symbol_data": {
+    "SPY": {
+      "price": 648.48,
+      "adv_10d": 1618013,
+      "dollar_vol": 1049249654.0
+    },
+    "NVDA": {
+      "price": 172.91,
+      "adv_10d": 4197294,
+      "dollar_vol": 725733136.0
+    },
+    "QQQ": {
+      "price": 582.09,
+      "adv_10d": 1148601,
+      "dollar_vol": 668583821.0
+    },
+    "LQD": {
+      "price": 107.84,
+      "adv_10d": 4025775,
+      "dollar_vol": 434139598.0
+    },
+    "IWM": {
+      "price": 242.33,
+      "adv_10d": 1502734,
+      "dollar_vol": 364157627.0
+    },
+    "AMZN": {
+      "price": 205.31,
+      "adv_10d": 1621090,
+      "dollar_vol": 332826173.0
+    },
+    "EFA": {
+      "price": 93.61,
+      "adv_10d": 2754220,
+      "dollar_vol": 257808847.0
+    },
+    "TLT": {
+      "price": 85.87,
+      "adv_10d": 2814318,
+      "dollar_vol": 241665512.0
+    },
+    "XLF": {
+      "price": 49.08,
+      "adv_10d": 3836145,
+      "dollar_vol": 188278002.0
+    },
+    "EMB": {
+      "price": 93.19,
+      "adv_10d": 1970284,
+      "dollar_vol": 183610803.0
+    },
+    "NFLX": {
+      "price": 91.88,
+      "adv_10d": 1838386,
+      "dollar_vol": 168901732.0
+    },
+    "EEM": {
+      "price": 55.63,
+      "adv_10d": 2958667,
+      "dollar_vol": 164590645.0
+    },
+    "XLV": {
+      "price": 145.38,
+      "adv_10d": 1091042,
+      "dollar_vol": 158615730.0
+    },
+    "VCIT": {
+      "price": 82.15,
+      "adv_10d": 1736899,
+      "dollar_vol": 142686327.0
+    },
+    "XLE": {
+      "price": 59.34,
+      "adv_10d": 2353409,
+      "dollar_vol": 139651338.0
+    },
+    "INTC": {
+      "price": 43.94,
+      "adv_10d": 2907436,
+      "dollar_vol": 127752738.0
+    },
+    "BAC": {
+      "price": 47.17,
+      "adv_10d": 2526627,
+      "dollar_vol": 119181000.0
+    },
+    "KRE": {
+      "price": 63.04,
+      "adv_10d": 1737661,
+      "dollar_vol": 109542187.0
+    },
+    "XLP": {
+      "price": 81.3,
+      "adv_10d": 1272286,
+      "dollar_vol": 103430498.0
+    },
+    "GDX": {
+      "price": 80.16,
+      "adv_10d": 1280700,
+      "dollar_vol": 102660936.0
+    },
+    "SOXL": {
+      "price": 51.12,
+      "adv_10d": 1884779,
+      "dollar_vol": 96340509.0
+    },
+    "TQQQ": {
+      "price": 43.1,
+      "adv_10d": 2192977,
+      "dollar_vol": 94528295.0
+    },
+    "IBIT": {
+      "price": 39.78,
+      "adv_10d": 2348751,
+      "dollar_vol": 93445082.0
+    },
+    "BITO": {
+      "price": 9.66,
+      "adv_10d": 9670252,
+      "dollar_vol": 93414639.0
+    },
+    "CSCO": {
+      "price": 77.67,
+      "adv_10d": 1170562,
+      "dollar_vol": 90917620.0
+    },
+    "USHY": {
+      "price": 36.53,
+      "adv_10d": 2465385,
+      "dollar_vol": 90060529.0
+    },
+    "SQQQ": {
+      "price": 80.31,
+      "adv_10d": 1013707,
+      "dollar_vol": 81410833.0
+    },
+    "T": {
+      "price": 28.34,
+      "adv_10d": 2562735,
+      "dollar_vol": 72627910.0
+    },
+    "XLU": {
+      "price": 44.66,
+      "adv_10d": 1615994,
+      "dollar_vol": 72162217.0
+    },
+    "EWZ": {
+      "price": 35.07,
+      "adv_10d": 1934798,
+      "dollar_vol": 67853394.0
+    },
+    "VZ": {
+      "price": 50.02,
+      "adv_10d": 1347916,
+      "dollar_vol": 67422788.0
+    },
+    "FXI": {
+      "price": 35.16,
+      "adv_10d": 1827775,
+      "dollar_vol": 64273729.0
+    },
+    "DVN": {
+      "price": 48.75,
+      "adv_10d": 1284670,
+      "dollar_vol": 62627697.0
+    },
+    "FCX": {
+      "price": 52.09,
+      "adv_10d": 1092359,
+      "dollar_vol": 56906489.0
+    },
+    "PFE": {
+      "price": 26.99,
+      "adv_10d": 2073719,
+      "dollar_vol": 55969689.0
+    },
+    "SLB": {
+      "price": 46.64,
+      "adv_10d": 1097459,
+      "dollar_vol": 51185488.0
+    },
+    "CMCSA": {
+      "price": 29.04,
+      "adv_10d": 1724922,
+      "dollar_vol": 50091746.0
+    },
+    "WBD": {
+      "price": 27.44,
+      "adv_10d": 1773398,
+      "dollar_vol": 48662058.0
+    },
+    "SOFI": {
+      "price": 16.93,
+      "adv_10d": 2614666,
+      "dollar_vol": 44279381.0
+    },
+    "PBR": {
+      "price": 18.77,
+      "adv_10d": 2347933,
+      "dollar_vol": 44082451.0
+    },
+    "HAL": {
+      "price": 36.55,
+      "adv_10d": 1188971,
+      "dollar_vol": 43456916.0
+    },
+    "CTRA": {
+      "price": 33.96,
+      "adv_10d": 1278865,
+      "dollar_vol": 43430272.0
+    },
+    "SPDN": {
+      "price": 10.03,
+      "adv_10d": 4251934,
+      "dollar_vol": 42625638.0
+    },
+    "SCHX": {
+      "price": 25.6,
+      "adv_10d": 1613461,
+      "dollar_vol": 41304607.0
+    },
+    "CMG": {
+      "price": 33.36,
+      "adv_10d": 1187383,
+      "dollar_vol": 39611104.0
+    },
+    "SPIB": {
+      "price": 33.34,
+      "adv_10d": 1183839,
+      "dollar_vol": 39469206.0
+    },
+    "CSX": {
+      "price": 38.18,
+      "adv_10d": 1006076,
+      "dollar_vol": 38412005.0
+    },
+    "CCL": {
+      "price": 24.14,
+      "adv_10d": 1571065,
+      "dollar_vol": 37925519.0
+    },
+    "DOW": {
+      "price": 36.66,
+      "adv_10d": 1008660,
+      "dollar_vol": 36977509.0
+    },
+    "VG": {
+      "price": 15.76,
+      "adv_10d": 2196221,
+      "dollar_vol": 34612449.0
+    },
+    "F": {
+      "price": 11.52,
+      "adv_10d": 2873027,
+      "dollar_vol": 33097277.0
+    },
+    "KWEB": {
+      "price": 28.22,
+      "adv_10d": 1166353,
+      "dollar_vol": 32914504.0
+    },
+    "CVE": {
+      "price": 25.1,
+      "adv_10d": 1275891,
+      "dollar_vol": 32024877.0
+    },
+    "ETHA": {
+      "price": 16.1,
+      "adv_10d": 1969269,
+      "dollar_vol": 31705236.0
+    },
+    "AAL": {
+      "price": 10.45,
+      "adv_10d": 2950664,
+      "dollar_vol": 30834448.0
+    },
+    "NU": {
+      "price": 13.96,
+      "adv_10d": 2142518,
+      "dollar_vol": 29898843.0
+    },
+    "VALE": {
+      "price": 14.05,
+      "adv_10d": 2119526,
+      "dollar_vol": 29779352.0
+    },
+    "HPE": {
+      "price": 21.69,
+      "adv_10d": 1343319,
+      "dollar_vol": 29136609.0
+    },
+    "PINS": {
+      "price": 18.7,
+      "adv_10d": 1527012,
+      "dollar_vol": 28562769.0
+    },
+    "NOK": {
+      "price": 8.0,
+      "adv_10d": 3393883,
+      "dollar_vol": 27134099.0
+    },
+    "HIMS": {
+      "price": 22.02,
+      "adv_10d": 1184237,
+      "dollar_vol": 26076908.0
+    },
+    "SMCI": {
+      "price": 20.56,
+      "adv_10d": 1263366,
+      "dollar_vol": 25974821.0
+    },
+    "TSLG": {
+      "price": 5.92,
+      "adv_10d": 4249194,
+      "dollar_vol": 25155234.0
+    },
+    "NCLH": {
+      "price": 18.95,
+      "adv_10d": 1181073,
+      "dollar_vol": 22381349.0
+    },
+    "CDE": {
+      "price": 17.68,
+      "adv_10d": 1259213,
+      "dollar_vol": 22262902.0
+    },
+    "KHC": {
+      "price": 21.57,
+      "adv_10d": 1003005,
+      "dollar_vol": 21634837.0
+    },
+    "OWL": {
+      "price": 9.13,
+      "adv_10d": 2313891,
+      "dollar_vol": 21137401.0
+    },
+    "PATH": {
+      "price": 12.07,
+      "adv_10d": 1713489,
+      "dollar_vol": 20681815.0
+    },
+    "HBAN": {
+      "price": 15.11,
+      "adv_10d": 1358506,
+      "dollar_vol": 20527033.0
+    },
+    "RKT": {
+      "price": 13.65,
+      "adv_10d": 1498287,
+      "dollar_vol": 20451618.0
+    },
+    "CPNG": {
+      "price": 18.83,
+      "adv_10d": 1082341,
+      "dollar_vol": 20380492.0
+    },
+    "RIVN": {
+      "price": 14.91,
+      "adv_10d": 1255094,
+      "dollar_vol": 18713460.0
+    },
+    "KVUE": {
+      "price": 17.41,
+      "adv_10d": 1062321,
+      "dollar_vol": 18500320.0
+    },
+    "PCG": {
+      "price": 17.34,
+      "adv_10d": 1061289,
+      "dollar_vol": 18402751.0
+    },
+    "QYLD": {
+      "price": 17.21,
+      "adv_10d": 1024844,
+      "dollar_vol": 17637570.0
+    },
+    "WULF": {
+      "price": 15.12,
+      "adv_10d": 1145516,
+      "dollar_vol": 17320205.0
+    },
+    "ITUB": {
+      "price": 7.84,
+      "adv_10d": 1708198,
+      "dollar_vol": 13392279.0
+    },
+    "NIO": {
+      "price": 5.44,
+      "adv_10d": 2372951,
+      "dollar_vol": 12908853.0
+    },
+    "RIG": {
+      "price": 6.24,
+      "adv_10d": 2003222,
+      "dollar_vol": 12490092.0
+    },
+    "MARA": {
+      "price": 8.49,
+      "adv_10d": 1314243,
+      "dollar_vol": 11157924.0
+    },
+    "AGNC": {
+      "price": 9.73,
+      "adv_10d": 1103348,
+      "dollar_vol": 10741102.0
+    },
+    "STLA": {
+      "price": 6.35,
+      "adv_10d": 1224458,
+      "dollar_vol": 7775314.0
+    }
+  }
+}

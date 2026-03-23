@@ -1,0 +1,169 @@
+{
+  "meta": {
+    "profile": "TTP_5K_FLEX",
+    "mode": "one-shot",
+    "started_at": "2026-03-22T08:53:46.168266-04:00",
+    "ended_at": "2026-03-22T08:54:30.183029-04:00",
+    "skip_gates": [
+      "session"
+    ]
+  },
+  "summary": {
+    "total_candidates": 1,
+    "would_trade": 0,
+    "blocked": 1,
+    "gate_block_freq": {
+      "sentiment": 1,
+      "ml": 1,
+      "gate19": 1
+    }
+  },
+  "candidates": [
+    {
+      "symbol": "TSLA",
+      "catalyst_type": "OTHER",
+      "urgency": 50,
+      "headline": "[SHADOW] Analysis scan for TSLA",
+      "source": "SHADOW_SCAN",
+      "timestamp": "2026-03-22T12:53:46.168714+00:00",
+      "side": "buy",
+      "would_trade": false,
+      "gates_passed": 11,
+      "gates_failed": 3,
+      "gates_skipped": 1,
+      "blocking_gates": [
+        "Gate 3: Sentiment",
+        "Gate ML: ML Analyzer",
+        "Gate 19: LLM CIO"
+      ],
+      "gate_results": [
+        {
+          "gate": "Gate 1: Daily Loss",
+          "id": "daily_loss",
+          "passed": true,
+          "skipped": false,
+          "detail": "pnl=$0.00, limit=$80.00",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 2: Session",
+          "id": "session",
+          "passed": true,
+          "skipped": true,
+          "detail": "SKIPPED by --skip-gates",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 3: Sentiment",
+          "id": "sentiment",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0.00, vix=26.8, threshold=0.35",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 4: Price",
+          "id": "price",
+          "passed": true,
+          "skipped": false,
+          "detail": "$368.10",
+          "value": 368.1
+        },
+        {
+          "gate": "Gate 5: Universe",
+          "id": "universe",
+          "passed": true,
+          "skipped": false,
+          "detail": "price=$368.10, prev_close=$382.60",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate 6: Regime",
+          "id": "regime",
+          "passed": true,
+          "skipped": false,
+          "detail": "score=50.0, threshold=50",
+          "value": 50.0
+        },
+        {
+          "gate": "Gate ML: ML Analyzer",
+          "id": "ml",
+          "passed": false,
+          "skipped": false,
+          "detail": "score=0, conf=0.00, threshold=45",
+          "value": 0
+        },
+        {
+          "gate": "Gate A: Max Orders",
+          "id": "max_orders",
+          "passed": true,
+          "skipped": false,
+          "detail": "today=0/3",
+          "value": 0
+        },
+        {
+          "gate": "Gate B: Rate Limit",
+          "id": "rate_limit",
+          "passed": true,
+          "skipped": false,
+          "detail": "elapsed=1774184036.3s, cooldown=3.0s",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate C: Wash-Sale",
+          "id": "wash_sale",
+          "passed": true,
+          "skipped": false,
+          "detail": "clear",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate H: No Hedge",
+          "id": "no_hedge",
+          "passed": true,
+          "skipped": false,
+          "detail": "no position",
+          "value": 0.0
+        },
+        {
+          "gate": "Gate I: Streak",
+          "id": "streak",
+          "passed": true,
+          "skipped": false,
+          "detail": "consecutive_losses=0, block_at=2",
+          "value": 0
+        },
+        {
+          "gate": "Gate 7: Risk Manager",
+          "id": "risk",
+          "passed": true,
+          "skipped": false,
+          "detail": "APPROVED | 4 shares",
+          "value": 4
+        },
+        {
+          "gate": "Gate 19: LLM CIO",
+          "id": "gate19",
+          "passed": false,
+          "skipped": false,
+          "detail": "ABORT (mult=0.0) | LOCAL_LLM 28127ms | Weak ML signal (direction_prob=0.5, confidence=0.5) and unfavorable market conte",
+          "value": 0.0
+        }
+      ],
+      "trade_setup": {
+        "entry_price": 368.84,
+        "stop_loss": 366.44,
+        "take_profit": 373.63,
+        "shares": 4,
+        "atr_15m": 1.5982,
+        "regime_score": 50.0,
+        "ml_score": 0,
+        "ml_confidence": 0.0,
+        "combined_score": 50.0,
+        "cio_action": "ABORT",
+        "cio_reasoning": "Weak ML signal (direction_prob=0.5, confidence=0.5) and unfavorable market context (SPY trend down, VIX elevated).",
+        "cio_multiplier": 0.0
+      }
+    }
+  ]
+}

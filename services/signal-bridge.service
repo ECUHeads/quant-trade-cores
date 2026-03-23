@@ -1,0 +1,32 @@
+# deploy/signal-bridge.service
+[Unit]
+Description=Quant Agent - Signal Bridge (JSON → API)
+After=signal-api.service
+Requires=signal-api.service
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/opt/ttp-trading
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/ttp-trading/.env
+
+ExecStart=/opt/ttp-trading/venv/bin/python3 -m platform.signal_bridge --watch ./signals/ --api-url http://localhost:8000
+
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+MemoryMax=256M
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ttp-trading
+
+StandardOutput=append:/opt/ttp-trading/logs/bridge.log
+StandardError=append:/opt/ttp-trading/logs/bridge-error.log
+
+[Install]
+WantedBy=multi-user.target

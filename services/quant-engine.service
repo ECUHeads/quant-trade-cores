@@ -1,0 +1,54 @@
+# deploy/quant-engine.service
+# ============================
+# systemd service สำหรับ Core Trading Engine
+#
+# ติดตั้ง:
+#   sudo cp deploy/*.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable quant-engine signal-api signal-bridge
+#   sudo systemctl start quant-engine signal-api signal-bridge
+#
+# ดูสถานะ:
+#   sudo systemctl status quant-engine
+#   sudo journalctl -u quant-engine -f          # ดู log real-time
+#   sudo journalctl -u quant-engine --since today
+#
+# Restart:
+#   sudo systemctl restart quant-engine
+
+[Unit]
+Description=Quant Agent - 15m Trading Engine (Gate 1-19)
+After=network.target
+Wants=signal-api.service
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/opt/ttp-trading
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/ttp-trading/.env
+
+ExecStart=/opt/ttp-trading/venv/bin/python3 main.py --profile TTP_5K_FLEX --mode paper
+
+# Auto-restart
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Memory limit (ป้องกัน leak → restart)
+MemoryMax=1G
+MemoryHigh=800M
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ttp-trading
+
+# Logging
+StandardOutput=append:/opt/ttp-trading/logs/engine.log
+StandardError=append:/opt/ttp-trading/logs/engine-error.log
+
+[Install]
+WantedBy=multi-user.target

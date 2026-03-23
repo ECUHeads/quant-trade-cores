@@ -1,0 +1,79 @@
+# ============================================================
+# requirements.txt — TTP News Trading System
+# ============================================================
+# ติดตั้งทั้งหมดด้วย:
+#   pip install -r requirements.txt
+#
+# หรือถ้าอยู่บน VPS / Ubuntu ที่ใช้ system Python:
+#   pip install -r requirements.txt --break-system-packages
+#
+# แนะนำให้ใช้ virtual environment:
+#   python -m venv venv
+#   source venv/bin/activate        # Linux / macOS
+#   venv\Scripts\activate           # Windows
+#   pip install -r requirements.txt
+# ============================================================
+
+# ── Alpaca Trading SDK (alpaca-py)
+# ใช้ใน: TTPOrderExecutor, JournalledOrderExecutor, main.py
+# รองรับ Paper & Live trading, Bracket Orders, Account info
+alpaca-py==0.43.2
+
+# ── Alpaca sub-dependencies (pin ไว้เพื่อ stability)
+msgpack==1.1.2          # binary serialization สำหรับ alpaca websocket
+pydantic==2.12.5        # data validation ที่ alpaca-py ใช้ภายใน
+sseclient-py==1.9.0     # Server-Sent Events สำหรับ streaming data
+websockets==16.0        # WebSocket connection สำหรับ real-time feed
+
+# ── Market Data
+# ใช้ใน: RegimeWeightedScorer (VIX/SPY), main.py (_fetch_price, _score_stock)
+yfinance==1.2.0
+
+# ── Data Processing
+# ใช้ใน: RegimeWeightedScorer (DataFrame), TTPDataPreprocessor
+pandas==3.0.1
+numpy==2.4.2
+
+# ── News Sources
+# ใช้ใน: SecEdgarRssSource (parse SEC EDGAR RSS feed)
+feedparser==6.0.12
+# ใช้ใน: BenzingaNewsSource, SecEdgarRssSource (HTTP requests)
+requests==2.32.5
+
+# ── Environment Variables
+# ใช้ใน: main.py (โหลด .env file แทนการ export ทีละตัว)
+# สร้างไฟล์ .env แล้วใส่:
+#   ALPACA_PAPER_KEY=pk_...
+#   ALPACA_PAPER_SECRET=...
+#   BENZINGA_API_KEY=...
+python-dotenv==1.2.1
+
+# ============================================================
+# ML / DL — Technical ML Analyzer
+# ============================================================
+
+# ── Classical ML (LightGBM + scikit-learn)
+# ใช้ใน: LightGBMModel — daily retrain, tabular features
+# inference < 1ms ต่อ prediction, explainable feature importance
+lightgbm==4.6.0
+
+# ── scikit-learn — preprocessing, metrics, model selection
+# ใช้ใน: RobustScaler, TimeSeriesSplit, roc_auc_score, CalibratedClassifierCV
+scikit-learn==1.8.0
+
+# ── joblib — save/load model (pickle-compatible, faster than pickle)
+# ใช้ใน: ModelRegistry.save_lgbm / load_lgbm
+joblib==1.5.3
+
+# ── PyTorch — LSTM model (GPU-ready)
+# ใช้ใน: LSTMModel — weekly retrain, 30-bar sequence model
+#
+# สำหรับ GPU server (CUDA 12.1) — แนะนำ:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# สำหรับ CPU only (VPS ทั่วไป):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# NOTE: ไม่ pin version ใน file นี้ เพราะ torch URL ขึ้นกับ CUDA version
+#       ถ้า GPU: ดูเวอร์ชัน CUDA ด้วย nvidia-smi แล้วเลือก wheel ที่ตรงกัน
+# torch>=2.0.0  # uncomment และใส่ index-url ที่เหมาะกับ hardware
