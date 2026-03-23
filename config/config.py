@@ -108,7 +108,7 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "firm_name":            "FTMO",
         "account_label":        "$100K Challenge",
         "asset_class":          "CFD",
-        "execution_method":     "MT5_PROXY",       # Linux → Windows Proxy → MT5 → FTMO
+        "execution_method":     "MT5",             # MetaTrader 5
         "allow_fractional":     True,              # CFD lots can be 0.01
         "account_size_usd":     100_000.0,
         "max_buying_power":     100_000.0,
@@ -134,31 +134,6 @@ PROP_FIRM_PROFILES: dict[str, dict] = {
         "min_adv":              0,
         "contract_multiplier":  100_000,           # 1 lot forex = 100K units
         "tick_size":            0.00001,            # 5 decimal forex
-
-        # ── MT5 Proxy Settings (Linux → Windows VPS bridge)
-        "mt5_proxy_url":         os.getenv("MT5_PROXY_URL", ""),
-        "mt5_proxy_api_key":     os.getenv("MT5_PROXY_API_KEY", ""),
-        "mt5_proxy_hmac_secret": os.getenv("MT5_PROXY_HMAC_SECRET", ""),
-
-        # ── FTMO Symbol Mapping: canonical engine name → MT5 broker name
-        #    Override ผ่าน env MT5_SYMBOL_MAP (JSON string) ได้
-        "symbol_map": {
-            # Forex
-            "EURUSD": "EURUSD",   "GBPUSD": "GBPUSD",   "USDJPY": "USDJPY",
-            "AUDUSD": "AUDUSD",   "USDCAD": "USDCAD",   "USDCHF": "USDCHF",
-            "NZDUSD": "NZDUSD",   "EURGBP": "EURGBP",   "EURJPY": "EURJPY",
-            "GBPJPY": "GBPJPY",   "EURCAD": "EURCAD",   "AUDCAD": "AUDCAD",
-            # Indices CFD
-            "US30":   "US30.cash",  "NAS100": "US100.cash",
-            "SPX500": "US500.cash", "GER40":  "GER40.cash",
-            "UK100":  "UK100.cash", "JPN225": "JP225.cash",
-            # Commodities
-            "XAUUSD": "XAUUSD",    "XAGUSD": "XAGUSD",
-            "USOIL":  "USOIL.cash", "UKOIL": "UKOIL.cash",
-            # Crypto CFD
-            "BTCUSD": "BTCUSD",    "ETHUSD": "ETHUSD",
-            "LTCUSD": "LTCUSD",    "XRPUSD": "XRPUSD",
-        },
     },
 
     # ── Topstep — $50K Futures (NQ)
@@ -462,19 +437,10 @@ def validate_profile(profile: dict) -> list[str]:
         )
 
     # Rule 6: execution_method
-    valid_methods = {"MT5", "MT5_PROXY", "API_REST", "JSON_DUMP"}
+    valid_methods = {"MT5", "API_REST", "JSON_DUMP"}
     em = profile.get("execution_method", "JSON_DUMP")
     if em not in valid_methods:
         errors.append(f"execution_method '{em}' not in {valid_methods}")
-
-    # Rule 10: MT5_PROXY ต้องมี proxy_url (warning, ไม่ block)
-    if em == "MT5_PROXY":
-        proxy_url = profile.get("mt5_proxy_url", "")
-        if not proxy_url:
-            errors.append(
-                "WARNING: execution_method=MT5_PROXY but mt5_proxy_url is empty. "
-                "Set env MT5_PROXY_URL or provide in profile."
-            )
 
     # Rule 7: asset_class
     if ac not in ASSET_CLASS_CONFIG:
@@ -526,7 +492,7 @@ class Config:
     BENZINGA_API_KEY    = os.getenv("BENZINGA_API_KEY",    "")
 
     # ── LLM Gate 19
-    LLM_PRIMARY         = os.getenv("LLM_PRIMARY",   "CLAUDE")   # CLAUDE | OPENAI | GEMINI
+    LLM_PRIMARY         = os.getenv("LLM_PRIMARY",   "CLAUDE")   # CLAUDE | OPENAI | GEMINI | LOCAL_LLM
     LLM_FALLBACK        = os.getenv("LLM_FALLBACK",  "OPENAI")   # fallback ถ้า primary fail
     LLM_ENABLED         = os.getenv("LLM_ENABLED", "true").lower() == "true"
     LLM_TIMEOUT_SEC     = 15
@@ -637,12 +603,6 @@ class Config:
     CONTRACT_MULTIPLIER  = 1
     TICK_SIZE            = 0.01
 
-    # ── MT5 Proxy (FTMO bridge — Linux → Windows VPS → MT5)
-    MT5_PROXY_URL         = os.getenv("MT5_PROXY_URL", "")
-    MT5_PROXY_API_KEY     = os.getenv("MT5_PROXY_API_KEY", "")
-    MT5_PROXY_HMAC_SECRET = os.getenv("MT5_PROXY_HMAC_SECRET", "")
-    SYMBOL_MAP            = {}
-
     # ── Profile metadata
     _active_profile_name = None
     _active_profile_raw  = {}
@@ -735,10 +695,6 @@ class Config:
             "min_adv":              "MIN_ADV",
             "contract_multiplier":  "CONTRACT_MULTIPLIER",
             "tick_size":            "TICK_SIZE",
-            # ── MT5 Proxy fields
-            "mt5_proxy_url":        "MT5_PROXY_URL",
-            "mt5_proxy_api_key":    "MT5_PROXY_API_KEY",
-            "mt5_proxy_hmac_secret": "MT5_PROXY_HMAC_SECRET",
         }
 
         for profile_key, attr_name in MAPPING.items():
@@ -750,17 +706,6 @@ class Config:
             cls.FLATTEN_TIME_ET = tuple(profile["flatten_time_et"])
         if "no_new_entry_after" in profile:
             cls.NO_NEW_ENTRY_AFTER = tuple(profile["no_new_entry_after"])
-
-        # ── Special: symbol_map (dict, not scalar)
-        if "symbol_map" in profile:
-            cls.SYMBOL_MAP = profile["symbol_map"]
-
-        # ── Special: MT5 Proxy — re-read from env at runtime
-        #    (os.getenv ใน profile dict evaluate ตอน module load ไม่ใช่ตอน load_profile)
-        if cls.EXECUTION_METHOD == "MT5_PROXY":
-            cls.MT5_PROXY_URL         = os.getenv("MT5_PROXY_URL", "")         or cls.MT5_PROXY_URL
-            cls.MT5_PROXY_API_KEY     = os.getenv("MT5_PROXY_API_KEY", "")     or cls.MT5_PROXY_API_KEY
-            cls.MT5_PROXY_HMAC_SECRET = os.getenv("MT5_PROXY_HMAC_SECRET", "") or cls.MT5_PROXY_HMAC_SECRET
 
         cls._active_profile_name = name
         cls._active_profile_raw  = profile
@@ -802,21 +747,6 @@ class Config:
             secret = cls.ALPACA_PAPER_SECRET or cls.ALPACA_LIVE_SECRET
         return key, secret
 
-    @classmethod
-    def get_mt5_proxy_config(cls) -> dict:
-        """
-        คืน MT5 Proxy config สำหรับ Mt5ProxyAdapter
-
-        Usage:
-          proxy_cfg = Config.get_mt5_proxy_config()
-          adapter = Mt5ProxyAdapter(**proxy_cfg)
-        """
-        return {
-            "mt5_proxy_url":        cls.MT5_PROXY_URL,
-            "mt5_proxy_api_key":    cls.MT5_PROXY_API_KEY,
-            "mt5_proxy_hmac_secret": cls.MT5_PROXY_HMAC_SECRET,
-        }
-
     # ══════════════════════════════════════════════════════════
     # VALIDATION
     # ══════════════════════════════════════════════════════════
@@ -853,21 +783,6 @@ class Config:
                 )
 
         # ── ตรวจ LLM keys
-        #if cls.LLM_ENABLED:
-        #    primary_cfg  = LLM_PROVIDERS.get(cls.LLM_PRIMARY, {})
-        #    fallback_cfg = LLM_PROVIDERS.get(cls.LLM_FALLBACK, {})
-
-        #    primary_key  = os.getenv(primary_cfg.get("api_key_env", ""), "")
-        #    fallback_key = os.getenv(fallback_cfg.get("api_key_env", ""), "")
-
-        #    if not primary_key and not fallback_key:
-        #        logger.warning(
-        #            f"[Config] Gate 19 LLM enabled but no API keys found "
-        #            f"({cls.LLM_PRIMARY} / {cls.LLM_FALLBACK}). "
-        #            f"Gate 19 will {cls.LLM_FAIL_ACTION} all trades."
-        #        )
-                
-        # ── ตรวจ LLM keys
         if cls.LLM_ENABLED:
             # ── Local LLM check
             if cls.LLM_LOCAL_ENABLED or cls.LLM_PRIMARY == "LOCAL_LLM":
@@ -897,24 +812,6 @@ class Config:
                         f"({cls.LLM_PRIMARY} / {cls.LLM_FALLBACK}). "
                         f"Gate 19 will {cls.LLM_FAIL_ACTION} all trades."
                     )
-                    
-        # ── ตรวจ MT5 Proxy keys (สำหรับ FTMO)
-        if cls.EXECUTION_METHOD == "MT5_PROXY":
-            if not cls.MT5_PROXY_URL:
-                logger.warning(
-                    "[Config] execution_method=MT5_PROXY but MT5_PROXY_URL is empty.\n"
-                    "   Set: export MT5_PROXY_URL='https://your-windows-vps:8500'"
-                )
-            if not cls.MT5_PROXY_API_KEY:
-                logger.warning(
-                    "[Config] MT5_PROXY_API_KEY not set.\n"
-                    "   Set: export MT5_PROXY_API_KEY='your-secure-key'"
-                )
-            if mode == "live" and not cls.MT5_PROXY_URL:
-                raise EnvironmentError(
-                    "Cannot run LIVE with MT5_PROXY without MT5_PROXY_URL!\n"
-                    "Set: export MT5_PROXY_URL='https://your-windows-vps:8500'"
-                )
 
         # ── สร้าง directories
         for d in [cls.SIGNAL_DIR, cls.JOURNAL_DIR, cls.MODEL_DIR, cls.PROFILE_DIR]:
@@ -972,13 +869,23 @@ class Config:
     @classmethod
     def summary(cls) -> str:
         """One-line summary ของ active config"""
+        if not cls.LLM_ENABLED:
+            llm_status = 'OFF'
+        elif cls.LLM_LOCAL_ONLY:
+            local_model = LLM_PROVIDERS.get("LOCAL_LLM", {}).get("model", "?")
+            llm_status = f'LOCAL_ONLY({local_model})'
+        elif cls.LLM_LOCAL_ENABLED:
+            llm_status = f'ON+LOCAL({cls.LLM_PRIMARY})'
+        else:
+            llm_status = f'ON({cls.LLM_PRIMARY})'
+
         return (
             f"[{cls._active_profile_name or 'default'}] "
             f"{cls.FIRM_NAME} {cls.ASSET_CLASS} | "
             f"${cls.ACCOUNT_SIZE_USD:,.0f} | "
             f"risk=${cls.RISK_PER_TRADE_USD:.0f}/trade | "
             f"exec={cls.EXECUTION_METHOD} | "
-            f"LLM={'ON' if cls.LLM_ENABLED else 'OFF'}"
+            f"LLM={llm_status}"
         )
 
 
@@ -1009,14 +916,6 @@ if __name__ == "__main__":
     assert Config.ASSET_CLASS == "CFD"
     assert Config.ALLOW_FRACTIONAL is True
     assert Config.CONTRACT_MULTIPLIER == 100_000
-    assert Config.EXECUTION_METHOD == "MT5_PROXY"
-    assert isinstance(Config.SYMBOL_MAP, dict)
-    assert len(Config.SYMBOL_MAP) > 0
-    assert "EURUSD" in Config.SYMBOL_MAP
-    proxy_cfg = Config.get_mt5_proxy_config()
-    assert "mt5_proxy_url" in proxy_cfg
-    print(f"    Symbol map: {len(Config.SYMBOL_MAP)} symbols")
-    print(f"    Proxy URL: '{Config.MT5_PROXY_URL}' (from env)")
 
     # ── Test 3: Load Topstep
     print("\n[3] Load TOPSTEP_50K_NQ")
