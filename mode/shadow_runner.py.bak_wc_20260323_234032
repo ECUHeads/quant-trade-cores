@@ -646,51 +646,6 @@ class ShadowRunner:
                 False, f"error: {e}",
             ))
 
-        # ── GATE WC: Worst Case Detector
-        if self._is_skipped("wc"):
-            sc.gate_results.append(self._gate(
-                "wc", "Gate WC: Worst Case Detector",
-                True, "SKIPPED by --skip-gates",
-            ))
-        else:
-            try:
-                if hasattr(p, 'wc_gate') and p.wc_gate is not None:
-                    wc_df = None
-                    try:
-                        from data_pipeline_manager import safe_yf_download
-                        wc_df = safe_yf_download(sym, period="5d", interval="15m")
-                    except Exception:
-                        pass
-
-                    if wc_df is not None and len(wc_df) >= 30:
-                        wc_verdict = p.wc_gate.evaluate(
-                            symbol=sym, df_15m=wc_df,
-                            atr=atr if 'atr' in dir() else 0.0
-                        )
-                        sc.gate_results.append(self._gate(
-                            "wc", "Gate WC: Worst Case Detector",
-                            not wc_verdict.is_danger,
-                            f"danger={wc_verdict.danger_score:.3f} "
-                            f"{'VETO' if wc_verdict.is_danger else 'PASS'} "
-                            f"top={wc_verdict.top_features[:3]}",
-                            value=wc_verdict.danger_score,
-                        ))
-                    else:
-                        sc.gate_results.append(self._gate(
-                            "wc", "Gate WC: Worst Case Detector",
-                            True, "insufficient data — pass (fail-open)",
-                        ))
-                else:
-                    sc.gate_results.append(self._gate(
-                        "wc", "Gate WC: Worst Case Detector",
-                        True, "no wc_gate module — pass",
-                    ))
-            except Exception as e:
-                sc.gate_results.append(self._gate(
-                    "wc", "Gate WC: Worst Case Detector",
-                    True, f"error: {e} — pass (fail-open)",
-                ))
-
         # ── GATE 19: LLM CIO
         if self._is_skipped("gate19"):
             sc.gate_results.append(self._gate(

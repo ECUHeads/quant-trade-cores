@@ -491,39 +491,6 @@ class TradingPipeline:
             shares = 10  # fallback
 
         # ══════════════════════════════════════════════════════
-        # GATE WC: Worst Case Detector — Toxic Market Veto
-        # ══════════════════════════════════════════════════════
-        if self.wc_gate:
-            try:
-                wc_df = None
-                try:
-                    from data_pipeline_manager import safe_yf_download
-                    wc_df = safe_yf_download(sym, period="5d", interval="15m")
-                except Exception:
-                    pass
-
-                if wc_df is not None and len(wc_df) >= 30:
-                    wc_verdict = self.wc_gate.evaluate(
-                        symbol=sym, df_15m=wc_df, atr=atr
-                    )
-                    if wc_verdict.is_danger:
-                        logger.warning(
-                            f"🛡️ Gate WC VETO: {sym} | "
-                            f"danger={wc_verdict.danger_score:.3f} | "
-                            f"top_features={wc_verdict.top_features[:3]}"
-                        )
-                        return  # VETO: skip trade, save LLM API cost
-                    else:
-                        logger.info(
-                            f"✅ Gate WC PASS: {sym} | "
-                            f"danger={wc_verdict.danger_score:.3f}"
-                        )
-                else:
-                    logger.debug(f"[WC] {sym}: insufficient data — pass")
-            except Exception as e:
-                logger.warning(f"[WC] {sym}: error {e} — pass (fail-open)")
-
-        # ══════════════════════════════════════════════════════
         # GATE 19: LLM CIO — Final Risk Veto
         # ══════════════════════════════════════════════════════
         verdict = self.gate19.evaluate_trade(
